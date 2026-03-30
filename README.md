@@ -1,2 +1,188 @@
-# Integraci-n-de-xArm5-5-DOF-en-NVIDIA-Isaac-Sim-con-ROS-2-Humble-para-pHRI
-Este repositorio documenta la metodología técnica completa para el despliegue de un entorno de simulación enfocado en la Interacción Humano-Robot Física (pHRI). El sistema integra un cobot UFACTORY xArm5 mediante ROS 2 (Humble) dentro del motor de físicas NVIDIA Isaac Sim 4.5.0.
+# Integración de xArm5 (5-DOF) en NVIDIA Isaac Sim con ROS 2 Humble para pHRI
+
+Este repositorio documenta la metodología técnica completa para el despliegue de un 
+entorno de simulación enfocado en la Interacción Humano-Robot Física (pHRI). 
+El sistema integra un cobot UFACTORY xArm5 mediante ROS 2 (Humble) dentro del motor de
+físicas NVIDIA Isaac Sim 4.5.0.
+
+**Autor:**  G. Emir Sánchez-Valdés 
+**Afiliación:** CINVESTAV - Departamento de Ingeniería Eléctrica, Sección de Mecatrónica.
+
+---
+
+## 📋 Requisitos Previos y Entorno de Hardware
+
+Para garantizar la replicabilidad del entorno, se especifican las características de la estación de trabajo base:
+
+* **Hardware:** Laptop Acer Nitro (GPU NVIDIA RTX Serie 40, e.g., RTX 4050).
+* **Sistema Operativo:** Configuración Dual-Boot con Windows y **Ubuntu 22.04 LTS**.
+* **BIOS/UEFI:** `Secure Boot` debe estar **desactivado** para permitir la correcta instalación de los controladores privativos de NVIDIA en Linux.
+
+![Configuración del BIOS para Secure Boot](assets/placeholder_bios_secure_boot.png)
+*(Imagen de ejemplo: Fotografía de la pantalla del BIOS mostrando el parámetro Secure Boot en "Disabled")*
+
+---
+
+## 🛠️ Fase 1: Preparación del Sistema Operativo y ROS 2
+
+### 1.1 Instalación de Ubuntu 22.04 LTS (Dual-Boot)
+Tras particionar el disco duro desde Windows y crear un USB booteable con Rufus, se procede a la instalación de Ubuntu 22.04. Es fundamental seleccionar la opción "Instalar software de terceros para hardware de gráficos" durante el proceso de instalación para obtener los drivers de NVIDIA preliminares.
+
+### 1.2 Instalación de ROS 2 Humble
+Se debe seguir la instalación oficial de paquetes Debian para ROS 2 Humble. En la terminal del sistema:
+
+
+Verificar soporte `UTF-8`
+~~~bash
+locale  
+sudo apt update && sudo apt install locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+~~~
+
+Añadir el repositorio de ROS 2
+~~~bash
+sudo apt install software-properties-common
+sudo add-apt-repository universe
+sudo apt update && sudo apt install curl -y
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+~~~
+
+Instalar ROS 2 Desktop
+~~~bash
+sudo apt update
+sudo apt install ros-humble-desktop -y
+~~~
+
+### 1.3 Entorno de NVIDIA Omniverse e Isaac Sim
+Descargar e instalar el **NVIDIA Omniverse Launcher** para Linux. Desde el Launcher, instalar **Isaac Sim 4.5.0**.
+
+Posteriormente, se configura un entorno virtual de Python (denominado `isaac_env`) para aislar las dependencias del simulador.
+
+![Omniverse Launcher mostrando Isaac Sim 4.5.0 instalado](assets/placeholder_omniverse_launcher.png)
+*(Imagen de ejemplo: Captura del Omniverse Launcher con el botón "Launch" visible en Isaac Sim)*
+
+---
+
+## ⚙️ Fase 2: Compilación del Espacio de Trabajo (xArm URDF)
+
+Para simular el brazo robótico, es necesario extraer su descripción física (URDF) desde su paquete oficial de ROS 2.
+
+**⚠️ Advertencia Crítica:** La compilación de paquetes de ROS 2 debe ejecutarse siempre en el entorno base del sistema. No se debe activar el entorno virtual `isaac_env` durante este paso, ya que causará conflictos (e.g., `ModuleNotFoundError: No module named 'catkin_pkg'`).
+
+### 2.1 Preparación y Compilación
+Asegurarse de que el entorno virtual esté desactivado e instalar dependencias faltantes:
+
+~~~bash
+deactivate
+sudo apt update
+sudo apt install python3-catkin-pkg -y
+~~~
+
+Limpiar cachés previas y compilar el paquete de descripción (`xarm_description`):
+
+~~~bash
+cd ~/xarm_ws
+rm -rf build install log
+colcon build --packages-select xarm_description
+~~~bash
+
+### 2.2 Generación del Archivo URDF Puro
+Una vez compilado, se traducen los macros de Xacro a un archivo URDF estándar, especificando el uso de 5 grados de libertad (xArm5) sin gripper:
+
+~~~bash
+source install/setup.bash
+xacro ~/xarm_ws/src/xarm_ros2/xarm_description/urdf/xarm_device.urdf.xacro dof:=5 add_gripper:=false > ~/xarm5_isaac.urdf
+~~~
+
+---
+
+## 🔧 Fase 3: Resolución de Rutas (El problema del "Robot Fantasma")
+
+NVIDIA Isaac Sim no procesa nativamente las directivas `package://` de ROS que apuntan a las mallas 3D (`.stl`). Si el URDF se importa tal cual, el robot será invisible en el simulador.
+
+Se deben inyectar las rutas absolutas del disco duro en el archivo URDF mediante la herramienta `sed`:
+
+~~~bash
+sed -i 's|package://xarm_description|/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description|g' ~/xarm5_isaac.urdf
+~~~
+
+---
+
+## 🖥️ Fase 4: Importación en Isaac Sim 4.5.0
+
+### 4.1 Activación de Extensiones
+Lanzar Isaac Sim desde su entorno virtual:
+
+~~~bash
+source ~/isaac_env/bin/activate
+isaacsim
+~~~
+
+En la barra superior, navegar a **Window > Extensions**. Buscar y activar (marcando la casilla **Autoload**):
+1. `URDF IMPORTER EXTENSION` (`isaacsim.asset.importer.urdf`)
+2. `ROS2 Bridge` (`omni.isaac.ros2_bridge`)
+
+![Panel de Extensiones en Isaac Sim con URDF Importer activo](assets/placeholder_extensions_panel.png)
+*(Imagen de ejemplo: Captura del panel de extensiones mostrando el interruptor verde en "URDF IMPORTER EXTENSION")*
+
+### 4.2 Importación del URDF
+1. Ir a **File > Import**.
+2. Seleccionar el archivo `~/xarm5_isaac.urdf`.
+3. En las opciones de importación (panel lateral o inferior):
+   * **Model:** Seleccionar `Create in Stage` (Evitar `Referenced Model` para permitir acceso a las articulaciones).
+   * **Links:** Seleccionar `Static Base` (Ancla la base del robot al suelo).
+4. Hacer clic en **Import**.
+5. *Nota: Si el modelo no está a la vista, seleccionarlo en el panel de **Stage** y presionar la tecla **F** para centrar la cámara.*
+
+![Robot xArm5 importado en el escenario de Isaac Sim](assets/placeholder_robot_stage.png)
+*(Imagen de ejemplo: Visor 3D de Isaac Sim mostrando el brazo metálico xArm5 ensamblado sobre la cuadrícula oscura)*
+
+---
+
+## 🧠 Fase 5: Action Graph y Comunicación ROS 2 (Telemetría)
+
+Para que el robot simulado actúe como un sensor y envíe los estados de sus articulaciones a Ubuntu, se debe programar su comportamiento mediante OmniGraph.
+
+### 5.1 Configuración de Nodos
+1. Navegar a **Window > Visual Scripting > Action Graph** y crear un `New Action Graph`.
+2. Arrastrar los siguientes nodos al lienzo y conectarlos secuencialmente (Pin `Tick` a Pin `Exec In`):
+   * `On Playback Tick`
+   * `ROS2 Publish Joint State`
+
+### 5.2 Asignación de Objetivos (Target)
+1. Seleccionar el nodo `ROS2 Publish Joint State`.
+2. En el panel **Property** (derecha), buscar la sección **Target**.
+3. Hacer clic en **Add Target** y seleccionar la raíz cinemática del robot en el árbol del escenario (típicamente `link1` o el contenedor `xarm5_isaac` que posea la propiedad *Articulation Root*).
+
+![Nodos conectados en el Action Graph apuntando a link1](assets/placeholder_action_graph.png)
+*(Imagen de ejemplo: Grafo visual mostrando la línea de conexión entre el nodo "Tick" y el nodo de publicación de ROS 2)*
+
+---
+
+## ✅ Fase 6: Pruebas y Guardado del Escenario (USD)
+
+### 6.1 Prueba de Vida (Joint States)
+1. En Isaac Sim, presionar el botón de **Play** (barra lateral izquierda) para iniciar la simulación física.
+2. Abrir una nueva terminal en Ubuntu y ejecutar:
+
+~~~bash
+source /opt/ros/humble/setup.bash
+ros2 topic echo /joint_states
+~~~
+
+La terminal debe arrojar en tiempo real la telemetría matemática (Posición, Velocidad y Esfuerzo/Torque simulado por gravedad) de las articulaciones `joint1` a `joint5`.
+
+![Terminal de Ubuntu mostrando el flujo de datos del tópico joint_states](assets/placeholder_terminal_ros_topic.png)
+*(Imagen de ejemplo: Captura de pantalla de la terminal mostrando los arrays de esfuerzo y posición)*
+
+### 6.2 Preservación del Entorno
+Para evitar reconstruir el Action Graph y las configuraciones físicas en sesiones futuras:
+
+1. Pausar la simulación (**Stop**).
+2. Ir a **File > Save As...**
+3. Guardar el escenario completo como un archivo USD en la raíz del espacio de trabajo: `~/xarm_ws/xarm5_phri_env.usd`.
+
+Para restaurar el sistema tras reiniciar el equipo, basta con cargar el entorno virtual de Isaac, abrir la interfaz gráfica y abrir el archivo `.usd` directamente.
