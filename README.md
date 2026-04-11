@@ -267,3 +267,78 @@ Si el comando `nvidia-smi` falla consistentemente tras una reinstalación limpia
 
 * **Solución 2 (Verificar Secure Boot):** Confirmar en la configuración de la BIOS que el parámetro `Secure Boot` permanece desactivado, ya que su activación bloquea la ejecución de drivers privativos en Linux.
 
+---
+
+
+## 🕹️ Fase 7: Control Bidireccional y Actuación (Python a Isaac Sim)
+
+Con la telemetría funcionando, el siguiente paso es cerrar el ciclo de control permitiendo que el xArm5 simulado reciba y ejecute comandos de posición calculados externamente en Ubuntu. Esto sienta las bases para la futura implementación de controladores de impedancia variable (VIC).
+
+### 7.1 Configuración de Escucha en Action Graph
+Se actualizó el grafo lógico en NVIDIA Isaac Sim para suscribir los motores del cobot a la red de ROS 2:
+
+1.  **Nuevos Nodos:** Se añadieron `ROS2 Subscribe Joint State` y `Articulation Controller`.
+2.  **Flujo de Ejecución (Tick):** Se conectó `On Playback Tick` $\rightarrow$ `Subscribe` $\rightarrow$ `Articulation Controller` para garantizar la sincronización por frame.
+3.  **Flujo de Datos:** Se vincularon los arrays de `Joint Names` y `Position Commands` desde el suscriptor hacia el controlador.
+4.  **Asignación:**
+    * **Target:** `link1` (Articulation Root del xArm5).
+    * **Topic Name:** `/joint_command`.
+
+![Configuración del Action Graph para Control Bidireccional](assets/placeholder_action_graph_control.png)
+*(Imagen de ejemplo: Nodos de suscripción y control conectados en el editor visual de Isaac Sim)*
+
+### 7.2 Implementación del Nodo de Control en Python
+Se desarrolló un nodo básico en ROS 2 (Humble) para publicar comandos de posición articular (`sensor_msgs/JointState`) hacia el simulador, verificando la integridad del puente de comunicación.
+
+**Ruta del script:** `~/xarm_ws/src/xarm_ros2/xarm_description/mover_robot.py`
+
+~~~python
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+import time
+
+class MoverXarm(Node):
+    def __init__(self):
+        super().__init__('mover_xarm_node')
+        # Publicación en el tópico configurado en Isaac Sim
+        self.publisher_ = self.create_publisher(JointState, '/joint_command', 10)
+        time.sleep(2) # Retardo de estabilización de red
+        self.enviar_comando()
+
+    def enviar_comando(self):
+        msg = JointState()
+        # Nombres de las articulaciones (5-DOF)
+        msg.name = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5']
+        
+        self.get_logger().info('Enviando comando: Moviendo robot a posición objetivo...')
+        # Vector de posición en radianes
+        msg.position = [0.5, -0.3, 0.2, 0.0, 0.5] 
+        self.publisher_.publish(msg)
+        time.sleep(4)
+        
+        self.get_logger().info('Enviando comando: Regresando a posición Zero (0.0)...')
+        msg.position = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.publisher_.publish(msg)
+
+def main(args=None):
+    rclpy.init(args=args)
+    nodo = MoverXarm()
+    rclpy.spin_once(nodo)
+    nodo.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+~~~
+
+### 7.3 Validación Experimental
+Para ejecutar el entorno:
+1.  Iniciar la simulación (Play) en NVIDIA Isaac Sim.
+2.  Verificar la disponibilidad del tópico: `ros2 topic list` (debe listar `/joint_command`).
+3.  Ejecutar el script de control:
+    ```bash
+    python3 mover_robot.py
+    ```
+El resultado esperado es la actuación física e inmediata de los motores del modelo 3D en el simulador, desplazándose a las coordenadas objetivo y retornando al origen tras 4 segundos, confirmando el éxito del esquema *Sim-to-Real* preliminar.
+
