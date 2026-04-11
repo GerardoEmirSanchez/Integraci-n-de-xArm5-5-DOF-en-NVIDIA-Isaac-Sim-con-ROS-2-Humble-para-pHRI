@@ -87,7 +87,7 @@ Limpiar cachés previas y compilar el paquete de descripción (`xarm_description
 cd ~/xarm_ws
 rm -rf build install log
 colcon build --packages-select xarm_description
-~~~bash
+~~~
 
 ### 2.2 Generación del Archivo URDF Puro
 Una vez compilado, se traducen los macros de Xacro a un archivo URDF estándar, especificando el uso de 5 grados de libertad (xArm5) sin gripper:
@@ -186,3 +186,84 @@ Para evitar reconstruir el Action Graph y las configuraciones físicas en sesion
 3. Guardar el escenario completo como un archivo USD en la raíz del espacio de trabajo: `~/xarm_ws/xarm5_phri_env.usd`.
 
 Para restaurar el sistema tras reiniciar el equipo, basta con cargar el entorno virtual de Isaac, abrir la interfaz gráfica y abrir el archivo `.usd` directamente.
+
+---
+
+## 🆘 Troubleshooting y Resolución de Problemas
+
+Durante el desarrollo de este entorno en una configuración Dual-Boot (Windows/Ubuntu) con gráficos híbridos, pueden surgir problemas de comunicación con la GPU. A continuación se documentan los errores más comunes y sus soluciones probadas.
+
+### Problema 1: Error de Inicialización CUDA en Isaac Sim
+Al ejecutar `isaacsim` desde la terminal, la interfaz no renderiza la malla 3D y la consola se inunda con el siguiente error continuo:
+
+~~~Plaintext
+[Error] [carb.cudainterop.plugin] CUDA error 100: cudaErrorNoDevice - no CUDA-capable device is detected)
+~~~
+
+**Diagnóstico:** Isaac Sim no detecta la GPU NVIDIA. Esto requiere verificar el estado del driver mediante el comando `nvidia-smi` en una nueva terminal.
+
+**Escenario A:`nvidia-smi` muestra la tabla correctamente.** 
+* **Causa:** Ubuntu está utilizando la tarjeta gráfica integrada (Intel/AMD) en modo ahorro de energía, ignorando la GPU dedicada para el renderizado.
+
+* **Solución:** Forzar el uso de la GPU NVIDIA mediante `prime-select`.
+
+  1. Ejecutar: `sudo prime-select nvidia`
+
+  2. Reiniciar el sistema informático por completo.
+
+**Escenario B: `nvidia-smi` devuelve un error de comunicación.** 
+
+El error arrojado es: `NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running`.
+
+* **Causa:** El kernel de Ubuntu ha perdido la sincronización con el driver privativo, usualmente debido a una actualización silenciosa del sistema (Unattended Upgrades) que falló al recompilar el módulo DKMS.
+
+* **Solución:** Realizar una "Tabla Rasa" purgando los drivers corruptos e instalando la versión exacta recomendada por el sistema.
+
+**Protocolo de Tabla Rasa (Reinstalación Limpia de Drivers):**
+
+1. Purgar el driver corrupto y dependencias:
+
+~~~Bash
+sudo apt-get purge '^nvidia-.*'
+sudo apt-get autoremove --purge
+~~~
+
+2. Identificar el driver recomendado:
+
+~~~Bash
+ubuntu-drivers devices
+~~~
+
+Buscar en la salida la línea que contenga la palabra `recommended` (ej. `nvidia-driver-550 - distro non-free recommended`). Anotar ese número.
+
+3. Instalar el driver específico:
+   
+Reemplazar `<VERSION>` con el número obtenido en el paso anterior.
+
+~~~Bash
+sudo apt update
+sudo apt install nvidia-driver-<VERSION>
+~~~
+
+4. Aplicar cambios:
+
+Reiniciar el sistema y verificar la conexión ejecutando `nvidia-smi` nuevamente. La tabla de estado de la GPU debe aparecer.
+
+### Problema 2: Bloqueo del BIOS o "Fast Startup" (Dual-Boot)
+
+Si el comando `nvidia-smi` falla consistentemente tras una reinstalación limpia en un sistema Dual-Boot, el hardware puede estar bloqueado a nivel de firmware o por el sistema operativo secundario.
+
+* **Solución 1 (Desactivar Fast Startup en Windows):** El "Inicio Rápido" de Windows pone el hardware en un estado de hibernación que impide que Linux inicialice la GPU.
+
+  1. Iniciar sesión en Windows.
+
+  2. Navegar a Panel de Control > Hardware y sonido > Opciones de energía.
+
+  3. Seleccionar "Elegir el comportamiento de los botones de inicio/apagado".
+
+  4. Hacer clic en "Cambiar la configuración actualmente no disponible" (requiere permisos de administrador).
+
+  5. Desmarcar la casilla "Activar inicio rápido (recomendado)" y guardar los cambios.
+
+* **Solución 2 (Verificar Secure Boot):** Confirmar en la configuración de la BIOS que el parámetro `Secure Boot` permanece desactivado, ya que su activación bloquea la ejecución de drivers privativos en Linux.
+
