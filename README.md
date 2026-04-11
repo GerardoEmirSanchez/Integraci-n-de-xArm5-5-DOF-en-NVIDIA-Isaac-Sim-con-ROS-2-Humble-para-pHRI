@@ -147,7 +147,7 @@ En la barra superior, navegar a **Window > Extensions**. Buscar y activar (marca
 Para que el robot simulado actúe como un sensor y envíe los estados de sus articulaciones a Ubuntu, se debe programar su comportamiento mediante OmniGraph.
 
 ### 5.1 Configuración de Nodos
-1. Navegar a **Window > Visual Scripting > Action Graph** y crear un `New Action Graph`.
+1. Navegar a **Window > Graph Editors > Action Graph** y crear un `New Action Graph`.
 2. Arrastrar los siguientes nodos al lienzo y conectarlos secuencialmente (Pin `Tick` a Pin `Exec In`):
    * `On Playback Tick`
    * `ROS2 Publish Joint State`
