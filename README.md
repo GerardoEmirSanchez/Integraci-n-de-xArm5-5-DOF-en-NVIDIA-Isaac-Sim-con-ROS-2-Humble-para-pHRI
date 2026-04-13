@@ -18,7 +18,7 @@ Para garantizar la replicabilidad del entorno, se especifican las característic
 * **Sistema Operativo:** Configuración Dual-Boot con Windows y **Ubuntu 22.04 LTS**.
 * **BIOS/UEFI:** `Secure Boot` debe estar **desactivado** para permitir la correcta instalación de los controladores privativos de NVIDIA en Linux.
 
-![Configuración del BIOS para Secure Boot](assets/placeholder_bios_secure_boot.png)
+<img width="2390" height="1792" alt="Gemini_Generated_Image_h6a21uh6a21uh6a2" src="https://github.com/user-attachments/assets/e44a196c-763b-4aa0-abd3-813b117844f3" />
 *(Imagen de ejemplo: Fotografía de la pantalla del BIOS mostrando el parámetro Secure Boot en "Disabled")*
 
 ---
