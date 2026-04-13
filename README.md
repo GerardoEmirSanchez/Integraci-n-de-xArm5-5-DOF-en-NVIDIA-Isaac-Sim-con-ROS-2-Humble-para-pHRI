@@ -22,6 +22,19 @@ físicas NVIDIA Isaac Sim 4.5.0.
 | `xarm5_phri_env.usd` | Escenario maestro de NVIDIA Isaac Sim (Binario). |
 | `xarm5_isaac.urdf` | Descripción cinemática procesada con rutas absolutas. |
 
+┃   
+┣ 📦 xarm_phri_project  
+┃ ┣ 📂 .vscode              
+┃ ┣ 📂 src  
+┃ ┃ ┗ 📂 xarm_ros2  
+┃ ┃   ┗ 📂 xarm_description    
+┃ ┃      ┣ 📜 mover_robot.py        
+┃ ┃      ┗ 📜 randomize_physics.py    
+┃ ┣ 📜 xarm5 phri env.usd   
+┃ ┗ 📜 xarm5_isaac.urdf     
+┃  
+┃  
+┗ Readme.cmd
 ---
 
 ## 📋 Requisitos Previos y Entorno de Hardware
