@@ -184,7 +184,8 @@ En la barra superior, navegar a **Window > Extensions**. Buscar y activar (marca
 1. `URDF IMPORTER EXTENSION` (`isaacsim.asset.importer.urdf`)
 2. `ROS2 Bridge` (`omni.isaac.ros2_bridge`)
 
-![Panel de Extensiones en Isaac Sim con URDF Importer activo](assets/placeholder_extensions_panel.png)
+<img width="1301" height="781" alt="Captura desde 2026-04-13 13-21-23" src="https://github.com/user-attachments/assets/63486784-1127-4a17-bdfd-d1390a909ef2" />
+
 *(Imagen de ejemplo: Captura del panel de extensiones mostrando el interruptor verde en "URDF IMPORTER EXTENSION")*
 
 ### 4.2 Importación del URDF
@@ -196,7 +197,10 @@ En la barra superior, navegar a **Window > Extensions**. Buscar y activar (marca
 4. Hacer clic en **Import**.
 5. *Nota: Si el modelo no está a la vista, seleccionarlo en el panel de **Stage** y presionar la tecla **F** para centrar la cámara.*
 
-![Robot xArm5 importado en el escenario de Isaac Sim](assets/placeholder_robot_stage.png)
+
+
+<img width="1850" height="1173" alt="Captura desde 2026-04-11 14-06-29" src="https://github.com/user-attachments/assets/c89dfb67-09d3-49b5-baa4-fe949765f80d" />
+
 *(Imagen de ejemplo: Visor 3D de Isaac Sim mostrando el brazo metálico xArm5 ensamblado sobre la cuadrícula oscura)*
 
 ---
@@ -216,7 +220,9 @@ Para que el robot simulado actúe como un sensor y envíe los estados de sus art
 2. En el panel **Property** (derecha), buscar la sección **Target**.
 3. Hacer clic en **Add Target** y seleccionar la raíz cinemática del robot en el árbol del escenario (típicamente `link1` o el contenedor `xarm5_isaac` que posea la propiedad *Articulation Root*).
 
-![Nodos conectados en el Action Graph apuntando a link1](assets/placeholder_action_graph.png)
+
+<img width="408" height="226" alt="Captura desde 2026-04-13 13-24-29" src="https://github.com/user-attachments/assets/06177ae2-536d-41ca-bda3-8be2353d8edd" />
+
 *(Imagen de ejemplo: Grafo visual mostrando la línea de conexión entre el nodo "Tick" y el nodo de publicación de ROS 2)*
 
 ---
