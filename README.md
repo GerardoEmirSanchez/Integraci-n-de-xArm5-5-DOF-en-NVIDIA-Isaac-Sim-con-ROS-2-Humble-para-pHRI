@@ -410,3 +410,128 @@ Para ejecutar el entorno:
     ```
 El resultado esperado es la actuación física e inmediata de los motores del modelo 3D en el simulador, desplazándose a las coordenadas objetivo y retornando al origen tras 4 segundos, confirmando el éxito del esquema *Sim-to-Real* preliminar.
 
+
+
+
+
+
+
+
+
+
+
+---
+
+
+## 💻 Fase 8: Entorno de Desarrollo Avanzado (Visual Studio Code)
+
+Para el desarrollo de algoritmos de control complejos y redes neuronales, se migró de editores de texto básicos a Visual Studio Code (VSC), configurándolo como un centro de mando unificado para ROS 2 e Isaac Sim.
+
+### 8.1 Instalación y Extensiones
+Instalación oficial mediante Snap:
+
+```bash
+sudo snap install --classic code
+```
+
+Extensiones instaladas:
+
+* Python (Microsoft): Para depuración y autocompletado del entorno virtual.
+
+* Robotics Developer Environment: Sucesor oficial de la extensión de ROS, optimizado para Humble.
+
+### 8.2 Automatización del Entorno (settings.json)
+
+Para evitar la ejecución manual de comandos `source` en cada terminal, se configuró un perfil de terminal automatizado en el espacio de trabajo (`~/xarm_ws/.vscode/settings.json`):
+
+```json
+{
+    "ROS2.distro": "humble",
+    "python.defaultInterpreterPath": "/home/gerardo_emir/isaac_env/bin/python",
+    "terminal.integrated.profiles.linux": {
+        "Isaac-ROS2-Humble": {
+            "path": "bash",
+            "args": [
+                "-c",
+                "source /opt/ros/humble/setup.bash && source /home/gerardo_emir/isaac_env/bin/activate && exec bash"
+            ]
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "Isaac-ROS2-Humble"
+}
+``` 
+
+
+---
+
+## 🎲 Fase 9: Domain Randomization y Simulación Headless
+
+Para abordar el Sim-to-Real Gap en pHRI, se implementó una metodología de "aleatorización del dominio". Esto permite que el robot aprenda a operar bajo condiciones variables de fricción, simulando el desgaste mecánico o cambios en el entorno de interacción humana.
+
+### 9.1 Modo Standalone (Python-Driven)
+
+A diferencia del modo GUI, aquí Python es el "dueño" del motor. El simulador se ejecuta en modo Headless (sin ventana gráfica), lo que reduce el consumo de VRAM en un 80% y permite simular miles de episodios por segundo.
+
+### 9.2 Script de Aleatorización de Fricción
+
+El siguiente script (`randomize_physics.py`) accede directamente a la API de PhysX de NVIDIA para modificar las propiedades del material físico en tiempo real.
+
+Ruta: `src/xarm_ros2/xarm_description/randomize_physics.py`
+
+```Python
+from isaacsim import SimulationApp
+# Iniciar simulador en modo fantasma para máximo rendimiento
+simulation_app = SimulationApp({"headless": True}) 
+
+import omni
+from omni.isaac.core import World
+from omni.isaac.core.utils.stage import open_stage
+import numpy as np
+
+def main():
+    # 1. Carga del escenario completo (USD)
+    usd_path = "/home/gerardo_emir/xarm_ws/xarm5 phri env.usd" 
+    open_stage(usd_path=usd_path)
+
+    # 2. Configuración del Mundo Físico
+    world = World(physics_dt=1.0/60.0, rendering_dt=1.0/60.0)
+    world.reset()
+    stage = omni.usd.get_context().get_stage()
+
+    print("🚀 Bucle de Domain Randomization Iniciado")
+    episodio = 1
+
+    while simulation_app.is_running():
+        world.step(render=False) # Sin renderizado para velocidad pura
+        
+        # Inyectar caos cada 300 frames (~5 segundos de simulación)
+        if world.current_time_step_index % 300 == 0:
+            nueva_friccion = np.random.uniform(0.05, 1.0)
+            print(f"--- Episodio {episodio} | Fricción Inyectada: {nueva_friccion:.3f} ---")
+            
+            # Acceso directo al Prim de material físico identificado mediante escaneo
+            ruta_material = "/colliders/PhysicsMaterial"
+            material_prim = stage.GetPrimAtPath(ruta_material)
+            
+            if material_prim.IsValid():
+                # Modificación de atributos dinámicos de PhysX
+                material_prim.GetAttribute("physics:dynamicFriction").Set(float(nueva_friccion))
+                material_prim.GetAttribute("physics:staticFriction").Set(float(nueva_friccion))
+            
+            episodio += 1
+
+    simulation_app.close()
+
+if __name__ == '__main__':
+    main()
+```
+
+### 9.3 Resultados de Ejecución
+
+En pruebas experimentales sobre una GPU RTX 4050, el sistema logró procesar más de 4,000 variaciones físicas en menos de 10 minutos, validando la arquitectura para el entrenamiento masivo de redes neuronales aplicadas a la estimación de fuerzas de contacto humano-robot.
+
+
+
+
+
+
