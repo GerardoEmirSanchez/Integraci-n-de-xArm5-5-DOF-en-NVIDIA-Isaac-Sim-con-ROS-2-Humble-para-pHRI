@@ -57,14 +57,73 @@ sudo apt install ros-humble-desktop -y
 ~~~
 
 ### 1.3 Entorno de NVIDIA Omniverse e Isaac Sim
-Descargar e instalar el **NVIDIA Omniverse Launcher** para Linux. Desde el Launcher, instalar **Isaac Sim 4.5.0**.
 
-Posteriormente, se configura un entorno virtual de Python (denominado `isaac_env`) para aislar las dependencias del simulador.
+La forma más directa, limpia y que mejor se integra con Ubuntu 22.04 es la instalación nativa vía Python PIP. Esto descargará el motor físico completo y la interfaz gráfica sin pasar por ningún gestor intermedio.
 
-![Omniverse Launcher mostrando Isaac Sim 4.5.0 instalado](assets/placeholder_omniverse_launcher.png)
-*(Imagen de ejemplo: Captura del Omniverse Launcher con el botón "Launch" visible en Isaac Sim)*
+*Paso 1: Preparar el entorno de Python*
 
----
+Instalar Isaac Sim en un entorno virtual (para que sus librerías masivas no choquen con las de ROS 2 ni las del sistema base).
+
+Abrir la terminal (`Ctrl + Alt + T`) y ejecuta:
+~~~bash
+sudo apt update
+sudo apt install python3-pip python3-venv -y
+~~~
+
+*Paso 2: Crear y activar el entorno virtual*
+
+Crear una carpeta dedicada para el entorno del simulador en el directorio principal.
+
+~~~bash
+python3 -m venv ~/isaac_env
+~~~
+
+Activar el entorno (notarás que el inicio de la línea de comandos cambia y ahora dice `isaac_env`):
+
+~~~bash
+source ~/isaac_env/bin/activate
+~~~
+
+*Paso 3: Instalar Isaac Sim*
+
+Ahora se le dirá a Python que se conecte directamente a los servidores privados de NVIDIA para descargar el simulador completo.
+
+Primero, se actualiza el gestor de paquetes:
+
+~~~bash
+pip install --upgrade pip
+~~~
+
+Luego, se ejecuta el comando de instalación apuntando al índice oficial de NVIDIA.
+
+~~~bash
+pip install "isaacsim[all,extscache]" --extra-index-url https://pypi.nvidia.com
+~~~
+Este comando sí obligará al sistema a conectarse a NVIDIA y comenzar a descargar el motor gráfico, la interfaz visual (Simulation App) y los puentes nativos de ROS 2 Humble. Esos puentes internos son exactamente los que permitirán enlazar tus nodos de control de admitancia y visión directamente hacia la réplica virtual del xArm5.
+
+*Paso 4: Iniciar la Interfaz Gráfica*
+
+Una vez que la instalación finalice, ya no buscarás un ícono en el escritorio. Para abrir el simulador con toda su interfaz visual, simplemente asegúrate de tener tu entorno activado y escribe el comando de lanzamiento en la terminal:
+
+~~~bash
+isaacsim
+~~~
+
+*Nota sobre la dinámica de trabajo:*
+
+A partir de ahora, cada vez que enciendas la computadora y quieras abrir Isaac Sim, el flujo de trabajo será abrir una terminal y ejecutar estos dos comandos:
+
+1. `source ~/isaac_env/bin/activate` (para entrar al entorno)
+
+2. `isaacsim` (para abrir el programa)
+
+Este modelo centrado en desarrolladores es mucho más robusto, ya que te permitirá en el futuro importar Isaac Sim directamente en tus scripts de Python como si fuera una librería matemática más (import isaacsim), lo cual es el estándar actual para entrenar redes neuronales sin sobrecargar la computadora con interfaces gráficas innecesarias.
+
+
+
+
+
+
 
 ## ⚙️ Fase 2: Compilación del Espacio de Trabajo (xArm URDF)
 
@@ -284,7 +343,10 @@ Se actualizó el grafo lógico en NVIDIA Isaac Sim para suscribir los motores de
     * **Target:** `link1` (Articulation Root del xArm5).
     * **Topic Name:** `/joint_command`.
 
-![Configuración del Action Graph para Control Bidireccional](assets/placeholder_action_graph_control.png)
+
+
+<img width="674" height="497" alt="Captura desde 2026-04-13 12-52-04" src="https://github.com/user-attachments/assets/9ca13bab-3391-41f8-ac8a-c0ae3b0931bc" />
+
 *(Imagen de ejemplo: Nodos de suscripción y control conectados en el editor visual de Isaac Sim)*
 
 ### 7.2 Implementación del Nodo de Control en Python
