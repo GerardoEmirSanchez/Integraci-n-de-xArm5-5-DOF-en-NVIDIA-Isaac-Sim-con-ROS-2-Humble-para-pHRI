@@ -8,6 +8,20 @@ físicas NVIDIA Isaac Sim 4.5.0.
 **Autor:**  G. Emir Sánchez-Valdés 
 **Afiliación:** CINVESTAV - Departamento de Ingeniería Eléctrica, Sección de Mecatrónica.
 
+
+
+
+## 📂 Estructura del Repositorio
+
+| Archivo / Carpeta | Descripción |
+| :--- | :--- |
+| `.vscode/` | Perfiles de terminal automatizados para cargar ROS 2 e Isaac Sim. |
+| `src/xarm_ros2/` | Paquetes oficiales de UFACTORY adaptados para simulación. |
+| `src/xarm_ros2/xarm_description/randomize_physics.py` | Script principal para **Domain Randomization** (fricción). |
+| `src/xarm_ros2/xarm_description/mover_robot.py` | Nodo de control de posición articular en ROS 2. |
+| `xarm5_phri_env.usd` | Escenario maestro de NVIDIA Isaac Sim (Binario). |
+| `xarm5_isaac.urdf` | Descripción cinemática procesada con rutas absolutas. |
+
 ---
 
 ## 📋 Requisitos Previos y Entorno de Hardware
