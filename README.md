@@ -500,59 +500,103 @@ Para evitar la ejecución manual de comandos `source` en cada terminal, se confi
 
 ## 🎲 Fase 9: Domain Randomization y Simulación Headless
 
-Para abordar el Sim-to-Real Gap en pHRI, se implementó una metodología de "aleatorización del dominio". Esto permite que el robot aprenda a operar bajo condiciones variables de fricción, simulando el desgaste mecánico o cambios en el entorno de interacción humana.
+Para abordar el Sim-to-Real Gap en la estimación de fuerzas para pHRI, se implementó una metodología de aleatorización del dominio. Dado que el manipulador opera en el espacio libre sin contacto inicial, la aleatorización de la fricción de superficie ( $\mu$ ) resulta inefectiva. En su lugar, el sistema perturba las inercias dinámicas modificando la masa del efector final y el amortiguamiento articular (fricción interna viscosa).
 
-### 9.1 Modo Standalone (Python-Driven)
+### 9.1 Script de Aleatorización y Recolección (Data Logger)
+El script `randomize_physics_logger.py` ejecuta el simulador en modo Headless (sin renderizado gráfico) para optimizar el consumo de VRAM. Inyecta una trayectoria de excitación senoidal a los controladores PD del robot y registra la telemetría a 60 Hz.
 
-A diferencia del modo GUI, aquí Python es el "dueño" del motor. El simulador se ejecuta en modo Headless (sin ventana gráfica), lo que reduce el consumo de VRAM en un 80% y permite simular miles de episodios por segundo.
-
-### 9.2 Script de Aleatorización de Fricción
-
-El siguiente script (`randomize_physics.py`) accede directamente a la API de PhysX de NVIDIA para modificar las propiedades del material físico en tiempo real.
-
-Ruta: `src/xarm_ros2/xarm_description/randomize_physics.py`
+Ruta: `src/xarm_ros2/xarm_description/randomize_physics_logger.py`
 
 ```Python
 from isaacsim import SimulationApp
-# Iniciar simulador en modo fantasma para máximo rendimiento
 simulation_app = SimulationApp({"headless": True}) 
 
 import omni
 from omni.isaac.core import World
 from omni.isaac.core.utils.stage import open_stage
+from pxr import UsdPhysics 
 import numpy as np
+import csv 
+from omni.isaac.core.articulations import Articulation 
+from omni.isaac.core.utils.types import ArticulationAction 
 
 def main():
-    # 1. Carga del escenario completo (USD)
     usd_path = "/home/gerardo_emir/xarm_ws/xarm5 phri env.usd" 
     open_stage(usd_path=usd_path)
 
-    # 2. Configuración del Mundo Físico
-    world = World(physics_dt=1.0/60.0, rendering_dt=1.0/60.0)
+    dt_simulacion = 1.0/60.0
+    world = World(physics_dt=dt_simulacion, rendering_dt=dt_simulacion)
     world.reset()
     stage = omni.usd.get_context().get_stage()
 
-    print("🚀 Bucle de Domain Randomization Iniciado")
-    episodio = 1
+    ruta_robot = "/UF_ROBOT/link1" 
+    robot = Articulation(prim_path=ruta_robot, name="xarm5")
+    world.scene.add(robot)
+    world.reset() 
 
-    while simulation_app.is_running():
-        world.step(render=False) # Sin renderizado para velocidad pura
+    # Sintonización del controlador PD
+    kps = np.array([10000.0, 10000.0, 10000.0, 10000.0, 10000.0]) 
+    kds = np.array([1000.0, 1000.0, 1000.0, 1000.0, 1000.0])
+    robot.get_articulation_controller().set_gains(kps=kps, kds=kds)
+
+    nombre_archivo = "xarm5_telemetry_dataset.csv"
+    
+    with open(nombre_archivo, mode='w', newline='') as archivo_csv:
+        escritor = csv.writer(archivo_csv)
+        encabezados = [
+            "Tiempo_s", "Masa_Link5", "Damping_Articular",
+            "q1", "q2", "q3", "q4", "q5",
+            "dq1", "dq2", "dq3", "dq4", "dq5",
+            "tau1", "tau2", "tau3", "tau4", "tau5"
+        ]
+        escritor.writerow(encabezados)
         
-        # Inyectar caos cada 300 frames (~5 segundos de simulación)
-        if world.current_time_step_index % 300 == 0:
-            nueva_friccion = np.random.uniform(0.05, 1.0)
-            print(f"--- Episodio {episodio} | Fricción Inyectada: {nueva_friccion:.3f} ---")
+        episodio = 1
+        
+        while simulation_app.is_running():
+            tiempo_simulacion = world.current_time_step_index * dt_simulacion
+
+            # Excitación cinemática
+            desfases = np.array([0.0, 0.5, 1.0, 1.5, 2.0])
+            posiciones_objetivo = 0.5 * np.sin(2 * np.pi * 0.5 * tiempo_simulacion + desfases)
+            accion_motores = ArticulationAction(joint_positions=posiciones_objetivo)
+            robot.get_articulation_controller().apply_action(accion_motores)
+
+            world.step(render=False) 
             
-            # Acceso directo al Prim de material físico identificado mediante escaneo
-            ruta_material = "/colliders/PhysicsMaterial"
-            material_prim = stage.GetPrimAtPath(ruta_material)
+            # Inyección de perturbaciones paramétricas (cada 5 s)
+            if world.current_time_step_index % 300 == 0:
+                nueva_masa = np.random.uniform(0.1, 2.5)
+                nuevo_damping = np.random.uniform(5.0, 50.0)
+                
+                # Modificación de Masa (Link 5)
+                ruta_link5 = "/UF_ROBOT/link5" 
+                link5_prim = stage.GetPrimAtPath(ruta_link5)
+                if link5_prim.IsValid() and link5_prim.HasAPI(UsdPhysics.MassAPI):
+                    UsdPhysics.MassAPI(link5_prim).GetMassAttr().Set(float(nueva_masa))
+
+                # Modificación de Amortiguamiento (1-5)
+                for i in range(1, 6):
+                    ruta_joint = f"/UF_ROBOT/joints/joint{i}"
+                    joint_prim = stage.GetPrimAtPath(ruta_joint)
+                    if joint_prim.IsValid():
+                        drive_attr = joint_prim.GetAttribute("drive:angular:physics:damping")
+                        if drive_attr.IsValid():
+                            drive_attr.Set(float(nuevo_damping))
+                
+                episodio += 1
+
+            # Extracción de estado del robot
+            posiciones = robot.get_joint_positions()
+            velocidades = robot.get_joint_velocities()
+            torques = robot.get_measured_joint_efforts()
             
-            if material_prim.IsValid():
-                # Modificación de atributos dinámicos de PhysX
-                material_prim.GetAttribute("physics:dynamicFriction").Set(float(nueva_friccion))
-                material_prim.GetAttribute("physics:staticFriction").Set(float(nueva_friccion))
-            
-            episodio += 1
+            if posiciones is not None and velocidades is not None and torques is not None:
+                fila_datos = [tiempo_simulacion, nueva_masa, nuevo_damping] + posiciones.tolist() + velocidades.tolist() + torques.tolist()
+                escritor.writerow(fila_datos)
+
+            if episodio > 100:
+                break
 
     simulation_app.close()
 
@@ -560,12 +604,49 @@ if __name__ == '__main__':
     main()
 ```
 
-### 9.3 Resultados de Ejecución
+## 📊 Fase 10: Validación del Conjunto de Datos
 
-En pruebas experimentales sobre una GPU RTX 4050, el sistema logró procesar más de 4,000 variaciones físicas en menos de 10 minutos, validando la arquitectura para el entrenamiento masivo de redes neuronales aplicadas a la estimación de fuerzas de contacto humano-robot.
+Se desarrolló un script en Python utilizando `pandas` y `matplotlib` para la verificación gráfica de la telemetría extraída. El análisis confirma la correcta propagación de las perturbaciones físicas hacia los pares articulares ( $\tau$ ).
 
+Ruta: `src/xarm_ros2/xarm_description/verificar_dataset.py`
 
+```Python
+import pandas as pd
+import matplotlib.pyplot as plt
 
+def main():
+    df = pd.read_csv("xarm5_telemetry_dataset.csv")
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
 
+    # Variables aleatorizadas
+    ax1.plot(df['Tiempo_s'], df['Masa_Link5'], color='purple', drawstyle='steps-post')
+    ax1.set_title("Masa del Efector Final (Link 5)")
+    ax1.grid(True)
+
+    ax2.plot(df['Tiempo_s'], df['Damping_Articular'], color='brown', drawstyle='steps-post')
+    ax2.set_title("Fricción Interna Global (Damping Articular)")
+    ax2.grid(True)
+
+    # Dinámica multivariable
+    colores = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    for i in range(1, 6):
+        ax3.plot(df['Tiempo_s'], df[f'q{i}'], label=f'q_{i}', color=colores[i-1])
+        ax4.plot(df['Tiempo_s'], df[f'tau{i}'], label=f'tau_{i}', color=colores[i-1])
+
+    ax3.set_title("Trayectoria de Excitación (5 GDL)")
+    ax3.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    ax3.grid(True)
+
+    ax4.set_title("Esfuerzos Dinámicos Resultantes (Torques)")
+    ax4.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    ax4.grid(True)
+
+    ax1.set_xlim(0, 10)
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+    plt.show()
+
+if __name__ == '__main__':
+    main()
+``` 
 
 
