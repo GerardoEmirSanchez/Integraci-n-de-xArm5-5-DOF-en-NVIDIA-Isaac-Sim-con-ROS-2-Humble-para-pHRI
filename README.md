@@ -647,6 +647,11 @@ def main():
 
 if __name__ == '__main__':
     main()
-``` 
+```
+
+
+<img width="906" height="960" alt="Captura desde 2026-04-14 17-16-49" src="https://github.com/user-attachments/assets/7d61749d-ec56-4660-9ce5-d3530e17dd81" />
+
+*(Imagen de ejemplo: Resultado experimental)*
 
 
