@@ -500,10 +500,10 @@ Para evitar la ejecución manual de comandos `source` en cada terminal, se confi
 
 ## 🎲 Fase 9: Domain Randomization y Simulación Headless
 
-Para abordar el Sim-to-Real Gap en la estimación de fuerzas para pHRI, se implementó una metodología de aleatorización del dominio. Dado que el manipulador opera en el espacio libre sin contacto inicial, la aleatorización de la fricción de superficie ( $\mu$ ) resulta inefectiva. En su lugar, el sistema perturba las inercias dinámicas modificando la masa del efector final y el amortiguamiento articular (fricción interna viscosa).
+Para abordar el Sim-to-Real Gap en la estimación de fuerzas para pHRI, se implementó una metodología de aleatorización del dominio. Dado que el manipulador opera en el espacio libre sin contacto inicial, la aleatorización de la fricción de superficie ( $\mu$ ) resulta inefectiva. En su lugar, el sistema perturba las inercias dinámicas modificando la masa del efector final y el amortiguamiento de cada articulación (fricción interna viscosa).
 
 ### 9.1 Script de Aleatorización y Recolección (Data Logger)
-El script `randomize_physics_logger.py` ejecuta el simulador en modo Headless (sin renderizado gráfico) para optimizar el consumo de VRAM. Inyecta una trayectoria de excitación senoidal a los controladores PD del robot y registra la telemetría a 60 Hz.
+El script `randomize_physics_logger.py` ejecuta el simulador en modo Headless (sin renderizado gráfico) para optimizar el consumo de VRAM. Este script inyecta una trayectoria de excitación senoidal a los controladores PD del robot y registra los datos en un dataset (a 60 Hz).
 
 Ruta: `src/xarm_ros2/xarm_description/randomize_physics_logger.py`
 
@@ -606,7 +606,7 @@ if __name__ == '__main__':
 
 ## 📊 Fase 10: Validación del Conjunto de Datos
 
-Se desarrolló un script en Python utilizando `pandas` y `matplotlib` para la verificación gráfica de la telemetría extraída. El análisis confirma la correcta propagación de las perturbaciones físicas hacia los pares articulares ( $\tau$ ).
+Se desarrolló un script en Python utilizando `pandas` y `matplotlib` para la verificación gráfica de los datos extraídos. El análisis permite confirmar una correcta propagación de las perturbaciones físicas hacia los pares articulares ( $\tau$ ).
 
 Ruta: `src/xarm_ros2/xarm_description/verificar_dataset.py`
 
