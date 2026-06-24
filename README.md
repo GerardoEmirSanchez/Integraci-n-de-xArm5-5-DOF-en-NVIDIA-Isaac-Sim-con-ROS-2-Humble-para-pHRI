@@ -652,6 +652,51 @@ if __name__ == '__main__':
 
 <img width="906" height="960" alt="Captura desde 2026-04-14 17-16-49" src="https://github.com/user-attachments/assets/7d61749d-ec56-4660-9ce5-d3530e17dd81" />
 
-*(Imagen de ejemplo: Resultado experimental)*
+**(Imagen de ejemplo: Resultado experimental)**
+
+
+
+## ⚠️ Fase 11: La Desviación Metodológica (El "Reality Gap" y Covariate Shift)
+
+Al intentar entrenar la primera iteración de la red neuronal (Behavior Cloning) basándonos estrictamente en los datos del Paso 10, nos topamos con un problema fundamental al cerrar el bucle en Isaac Sim: El robot colapsaba sobre sí mismo en menos de 5 segundos.
+
+### 11.1 El Diagnóstico del FalloLa red neuronal original fue diseñada con 13 variables de estado, las cuales incluían los torques de las articulaciones medidos físicamente ($\tau_1 \dots \tau_5$).
+
+**El problema:** El motor PhysX 5 de NVIDIA, aunque sumamente preciso, no modela a la perfección las fricciones no lineales, el efecto Stribeck ni los engranajes armónicos específicos del UFACTORY xArm5 real.
+
+Esto provocó un fenómeno conocido como Reality Gap (Brecha de Realidad):
+
+1. El torque simulado era ligeramente distinto al torque real.
+2. La IA recibía este torque "falso", haciendo una predicción con un ligero error.
+3. Este error llevaba al robot a una posición inexplorada, lo que generaba un torque simulado aún más anómalo en el siguiente ciclo.
+4. El error se acumulaba exponencialmente (Covariate Shift o Compounding Error), causando inestabilidad matemática.
+
+**[Imagen 1: Gráfica o captura del simulador Isaac Sim mostrando la divergencia de la trayectoria original y el colapso del brazo robótico debido al error compuesto]**
+
+
+## 🧠 Fase 12: Reestructuración a Política "Time-Aware" 6D y Preprocesamiento
+
+Para solucionar el colapso, se planteó una desviación metodológica: Hacer a la red completamente "ciega" a los torques articulares. Si la IA no lee torques, no le afectará la diferencia de fricciones entre el simulador y la realidad.
+
+La red ahora debe entender la dinámica guiándose puramente por la cinemática, la fuerza externa y el paso del tiempo.
+
+### 12.1 Nuevos Vectores de Estado y Acción
+
+Se redefinió el espacio de observación y actuación, expandiéndolo para controlar los 6 Grados de Libertad (6D: Traslación y Orientación) e inyectando la variable temporal $\Delta t$ para que la red integre la velocidad tácitamente.
+
+* Vector de Estado (15 Entradas): $s_t = [\Delta t, F_x, F_y, F_z, T_x, T_y, T_z, Roll, Pitch, Yaw, q_1, q_2, q_3, q_4, q_5]$
+* Vector de Acción (8 Salidas): $a_t = [\Delta X, \Delta Y, \Delta Z, \Delta Roll, \Delta Pitch, \Delta Yaw, Vel_{filt}, Acc_{filt}]$
+
+
+
+
+
+
+
+
+
+
+
+
 
 
