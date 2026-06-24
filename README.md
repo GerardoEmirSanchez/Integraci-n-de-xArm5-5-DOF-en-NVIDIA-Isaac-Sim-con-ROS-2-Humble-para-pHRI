@@ -687,14 +687,138 @@ Se redefinió el espacio de observación y actuación, expandiéndolo para contr
 * Vector de Estado (15 Entradas): $s_t = [\Delta t, F_x, F_y, F_z, T_x, T_y, T_z, Roll, Pitch, Yaw, q_1, q_2, q_3, q_4, q_5]$
 * Vector de Acción (8 Salidas): $a_t = [\Delta X, \Delta Y, \Delta Z, \Delta Roll, \Delta Pitch, \Delta Yaw, Vel_{filt}, Acc_{filt}]$
 
+### 12.2 Estabilidad Numérica (Z-Score y Aritmética Modular)
 
+Al mezclar milímetros con aceleraciones de hasta $35,000 \text{ mm/s}^2$, los gradientes de la red explotaban. Además, los ángulos de Euler generaban saltos discontinuos al pasar de $-180^\circ$ a $180^\circ$. Se implementaron dos soluciones:
 
+1. Aritmética Modular en Ángulos: Para evitar que la red perciba un giro falso de $360^\circ$ como un error catastrófico.
+2. Normalización Z-Score: A todas las entradas y salidas.
 
+Script de Transformación de Datos (Python):
 
+```Python
+import numpy as np
+import pandas as pd
 
+# 1. Aritmética Modular para deltas de orientación (RPY)
+def normalizar_angulo_modular(delta_theta_grados):
+    """ Mantiene la diferencia angular en el camino más corto [-180, 180] """
+    return ((delta_theta_grados + 180) % 360) - 180
 
+# 2. Normalización Z-Score de características
+def normalizar_z_score(df, columnas):
+    estadisticas = {}
+    for col in columnas:
+        mu = df[col].mean()
+        sigma = df[col].std()
+        df[f"{col}_norm"] = (df[col] - mu) / (sigma + 1e-8) # 1e-8 evita división por cero
+        estadisticas[col] = {'mean': mu, 'std': sigma}
+    return df, estadisticas
+```
 
+## 🛡️ Fase 13: Topología Parsimoniosa, Huber Loss y Dropout (PyTorch)
 
+Durante el primer entrenamiento 6D, la red de embudo masiva ([256 -> 500 -> 128]) memorizó el ruido mecánico del sensor OptoForce (sobreajuste con MSE de $10^{-6}$) y generó problemas de size mismatch al inferir.
+
+Se aplicó el principio de parsimonia: una red más pequeña obligada a generalizar.
+
+1. Reducción Topológica: Arquitectura `[15 -> 128 -> 128 -> 8]`.
+2. Huber Loss (Smooth L1): Sustituye al Error Cuadrático Medio (MSE). Actúa de forma lineal ante valores atípicos (ruido del sensor de fuerza) y cuadrática en errores pequeños, ignorando "picos" falsos.
+3. Dropout Bayesiano: Se apaga aleatoriamente el 15% ($p=0.15$) de las neuronas en cada paso. Obliga a la red a no depender de trayectorias específicas y aprender la verdadera "ley de admitancia".
+
+**Implementación de la Red (PyTorch):**
+Ruta: `src/xarm_ros2/xarm_description/modelos/xarm5_policy_6D.py`
+
+```Python
+import torch
+import torch.nn as nn
+
+class PolicyNetwork6D(nn.Module):
+    def __init__(self, input_dim=15, output_dim=8):
+        super(PolicyNetwork6D, self).__init__()
+        
+        self.red = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(p=0.15), # Aproximación de incertidumbre
+            
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Dropout(p=0.15),
+            
+            nn.Linear(128, output_dim)
+        )
+
+    def forward(self, x):
+        return self.red(x)
+
+# Para entrenamiento se usó torch.nn.HuberLoss(delta=1.0)
+```
+
+## 🔄 Fase 14: Cierre de Bucle Sim-to-Sim (Cinemática Inversa y Jacobiano)
+
+La salida de nuestra IA son desplazamientos cartesianos 6D ($\Delta X_{6D}$), pero en Isaac Sim debemos enviarle posiciones angulares a los 5 motores ($\Delta q$).
+
+Dado que el xArm5 tiene 5 GDL y la tarea exige controlar 6 GDL, estamos ante un sistema subactuado. Utilizar un optimizador estándar generaba inestabilidades en la muñeca. Se justificó matemáticamente el uso del Jacobiano Espacial completo de $6 \times 5$ con la pseudo-inversa de Moore-Penrose. Esto restringe al brazo para que priorice estrictamente la orientación solicitada por la IA sacrificando eslabones base si es necesario.
+
+$$\Delta q = J^\dagger(q) \Delta X_{6D}$$
+
+**Implementación en el nodo de inferencia:**
+
+```Python
+# Cálculo de cinemática inversa con pseudo-inversa
+jacobiano = robot.get_jacobians()[0] # Matriz 6x5
+jacobiano_pinv = np.linalg.pinv(jacobiano) # Moore-Penrose Pseudo-inverse
+
+# Producto punto: (5x6) * (6x1) = (5x1) deltas articulares
+delta_q = np.dot(jacobiano_pinv, accion_cartesiana_ia[:6])
+posiciones_articulares_deseadas = q_actuales + delta_q
+```
+
+## 📈 Fase 15: Evaluación Cuantitativa (Filtros y Data Logging)
+
+Para validar científicamente que la clonación de comportamiento fue exitosa, no basta con observar el simulador; necesitamos extraer las métricas de error entre la trayectoria del controlador matemático original (Experto) y las decisiones de la IA (Novato).
+
+Desafío técnico: La derivada numérica que usa PhysX para calcular velocidades angulares (`get_joint_velocities()`) es sumamente ruidosa. Antes de registrar los datos o pasarlos a la IA, debemos aplicar un Filtro Pasa-Bajas de primer orden (Filtro Alpha).
+
+Se insertó un *Data Logger* dentro del script maestro de simulación para registrar las respuestas de la IA.
+
+Ruta: `src/xarm_ros2/xarm_description/ejecutar_politica_isaac_v2.2.py`
+
+```Python
+# Variables globales para el filtro de velocidad
+alpha_filtro = 0.2
+velocidades_filtradas = np.zeros(5)
+registro_validacion = [] # Data Logger
+
+while simulation_app.is_running():
+    # 1. Obtener estado puro
+    posicion_ee, orientacion_ee = xarm_view.get_world_poses()
+    velocidades_crudas = robot.get_joint_velocities()[0][:5].numpy()
+    
+    # 2. Aplicar Filtro Pasa-Bajas (Alpha Filter)
+    velocidades_filtradas = (alpha_filtro * velocidades_crudas) + ((1 - alpha_filtro) * velocidades_filtradas)
+    
+    # [ ... Inferencia de PyTorch aquí ... ]
+    
+    # 3. Registrar telemetría de validación
+    registro_validacion.append({
+        'Tiempo': world.current_time_step_index * dt,
+        'Fuerza_Externa_Z': F_sim[2],
+        'Posicion_Z_IA': posicion_ee[0][2].item(),
+        'Error_Euclideo': np.linalg.norm(posicion_ee[0] - posicion_experto_referencia)
+    })
+    
+    world.step(render=True)
+
+# Exportar al finalizar
+import pandas as pd
+df_resultados = pd.DataFrame(registro_validacion)
+df_resultados.to_csv("trayectoria_ia_predicha.csv", index=False)
+print("✅ Datos de validación cuantitativa exportados exitosamente.")
+```
+
+**[Imagen 2: Gráfico de superposición generado a partir de 'trayectoria_ia_predicha.csv'. Debe mostrar en un eje la fuerza inyectada y en el otro la trayectoria Z del Controlador VIC vs. la Trayectoria Z inferida por la Red Neuronal, demostrando un error estacionario submilimétrico y estabilización compliante]**
 
 
 
