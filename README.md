@@ -822,5 +822,99 @@ print("✅ Datos de validación cuantitativa exportados exitosamente.")
 
 
 
+## 🚀 Fase 16: Inventario de Código Final y Protocolo de Arranque (Cold Start)
+
+Tras superar las divergencias del *Reality Gap* y consolidar la arquitectura neuronal, el proyecto se estabiliza en un conjunto de scripts definitivos. A continuación, se detalla la estructura final del código y el protocolo exacto para ejecutar la validación desde una computadora recién encendida.
+
+### 16.1 Inventario de Archivos Definitivos
+El "cerebro" y el entorno de validación residen en el espacio de trabajo de ROS 2, estructurados de la siguiente manera:
+
+```text
+~/xarm_ws/
+├── xarm5_phri_env.usd                          # [1] Escenario 3D maestro con físicas listas
+└── src/xarm_ros2/xarm_description/
+    ├── modelos/
+    │   ├── xarm5_policy_6D.py                  # [2] Topología de la red [15 -> 128 -> 128 -> 8]
+    │   └── xarm5_policy_6D.pth                 # [3] Pesos entrenados (Con Huber Loss y Dropout)
+    ├── ejecutar_politica_isaac_v2.2.py         # [4] Script de Inferencia (Filtro Alpha y Data Logger)
+    └── analizar_resultados_6d.py               # [5] Script de validación (Error Euclídeo vs Experto)
+```
+
+
+### 16.2 Protocolo de Ejecución desde Cero (PC Recién Encendida)
+
+**Paso 1:** Inicializar el Motor Físico (NVIDIA Isaac Sim)
+
+1. Enciende la computadora y arranca en Ubuntu 22.04.
+2. Abre una terminal (`Ctrl + Alt + T`).
+3. Activa el entorno virtual de Python que contiene los binarios de NVIDIA y lanza el simulador:
+
+```bash
+source ~/isaac_env/bin/activate
+isaacsim
+```
+
+4. Una vez abierta la interfaz gráfica, ve a File > Open y selecciona el archivo `~/xarm_ws/xarm5_phri_env.usd`.
+5. Haz clic en el botón Play (Icono de reproducción en el panel izquierdo) para activar la gravedad y las físicas de PhysX 5.
+
+**Paso 2:** Lanzar el "Cerebro" (Nodo de Inferencia PyTorch)
+
+1. Abre una segunda terminal (puedes usar una pestaña nueva).
+2. Es obligatorio cargar las variables de entorno de ROS 2 y luego activar el entorno de Isaac/PyTorch:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/isaac_env/bin/activate
+```
+
+3. Navega a la carpeta de los scripts:
+
+```bash
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/
+```
+
+4. Ejecuta el script maestro de inferencia:
+
+```bash
+python3 ejecutar_politica_isaac_v2.2.py
+```
+
+El script cargará los pesos `.pth`, aplicará el control cinemático inverso usando la pseudo-inversa del Jacobiano y comenzará a mover el robot en la pantalla de Isaac Sim, guardando sus decisiones en tiempo real.
+
+**Paso 3:** Extraer Métricas y Gráficas de Tesis
+
+1. Una vez que el script anterior termine su ciclo, notarás que ha generado un archivo llamado `trayectoria_ia_predicha.csv` en esa misma carpeta.
+2. En la misma terminal, ejecuta el script de análisis para comparar la predicción neuronal contra la trayectoria analítica del Experto (VIC):
+
+```bash
+python3 analizar_resultados_6d.py
+```
+
+Este comando abrirá una ventana de Matplotlib superponiendo ambas trayectorias y calculando el Error Cartesiano Euclídeo en milímetros.
+
+### 16.3 Notas de Mantenimiento para la Fase de Pruebas
+
+Si deseas activar el Domain Randomization (inyectar ruido Gaussiano al OptoForce para forzar el Dropout y probar la robustez), no necesitas abrir el entorno gráfico de Isaac Sim.
+
+Puedes abrir el script `ejecutar_politica_isaac_v2.2.py` con VS Code y cambiar la variable global `ENABLE_SENSOR_NOISE = False` a `True` en la cabecera del código.
+
+```bash
+code ~/xarm_ws/src/xarm_ros2/xarm_description/ejecutar_politica_isaac_v2.2.py
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
