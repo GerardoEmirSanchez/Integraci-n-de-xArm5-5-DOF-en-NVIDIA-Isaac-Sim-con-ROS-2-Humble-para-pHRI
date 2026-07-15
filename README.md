@@ -909,7 +909,9 @@ code ~/xarm_ws/src/xarm_ros2/xarm_description/ejecutar_politica_isaac_v2.2.py
 Durante las pruebas de robustez y transferencia, se identificaron vulnerabilidades críticas en la formulación discreta del control clásico y en la dimensionalidad de la política neuronal, requiriendo reestructuraciones fundamentales para viabilizar el despliegue.
 
 ### 17.1 Mitigación de la Bomba de Energía Numérica (Euler Semi-Implícito)
+
 Se sustituyó la integración de Euler Explícito por un esquema de Euler Semi-Implícito para el control de admitancia[cite: 6]. La formulación discreta anterior inducía un polo fuera del círculo unitario bajo variaciones bruscas de rigidez, actuando como una bomba de energía numérica e inestabilizando el sistema[cite: 6].
+
 * La nueva velocidad de comando se evalúa de forma implícita: $\dot{x}_c(k+1) = \frac{\dot{x}_c(k) + \frac{T}{M_d}[\hat{F}_{ext}(k) - K_d(k)(x_c(k) - x_{ref})]}{1 + \frac{T \cdot B_d(k)}{M_d}}$[cite: 6].
 * El polo característico se redefine como $z = [1 + \frac{T \cdot B_d(k)}{M_d}]^{-1}$[cite: 6].
 * Dado que los parámetros físicos son positivos, se garantiza que $z \in (0,1)$, asegurando la disipación asintótica de la energía elástica y proporcionando un amortiguamiento numérico que preserva la estabilidad física[cite: 6].
