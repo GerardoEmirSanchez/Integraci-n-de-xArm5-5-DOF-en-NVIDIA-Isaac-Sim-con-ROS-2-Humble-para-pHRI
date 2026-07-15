@@ -914,13 +914,481 @@ code .
 ```bash
 python3 entrenar_agente_bc_v3.3.py
 ```
+
+
+```python
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from datetime import datetime
+import glob
+import tkinter as tk
+from tkinter import filedialog
+
+class XArmDataset(Dataset):
+    def __init__(self, X_data, Y_data):
+        self.X = torch.tensor(X_data, dtype=torch.float32)
+        self.Y = torch.tensor(Y_data, dtype=torch.float32)
+    def __len__(self): return len(self.X)
+    def __getitem__(self, idx): return self.X[idx], self.Y[idx]
+
+class BehaviorCloningPolicy(nn.Module):
+    def __init__(self):
+        super(BehaviorCloningPolicy, self).__init__()
+        self.red_neuronal = nn.Sequential(
+            nn.Linear(15, 256), nn.ReLU(), nn.Dropout(p=0.1),
+            nn.Linear(256, 500), nn.ReLU(), nn.Dropout(p=0.1),
+            nn.Linear(500, 128), nn.ReLU(), nn.Dropout(p=0.1),
+            nn.Linear(128, 8)
+        )
+    def forward(self, x): return self.red_neuronal(x)
+    
+def train_model():
+    print("[INFO] Iniciando Entrenamiento BC v3.3 (Doble Norm. + Fix Cinemático + Fix Vector de Acción)...")
+    
+    root = tk.Tk(); root.withdraw() 
+    carpeta_datos = filedialog.askdirectory(title="Selecciona la carpeta de mediciones")
+    if not carpeta_datos: return
+
+    try:
+        archivos_csv = glob.glob(os.path.join(carpeta_datos, "*.csv"))
+        if not archivos_csv: return
+            
+        lista_x, lista_y = [], []
+        columnas_observacion = ['Fx', 'Fy', 'Fz', 'Tx_EE', 'Ty_EE', 'Tz_EE', 'q1', 'q2', 'q3', 'q4', 'q5', 'F_Amp', 'Beta', 'K_Stiffness', 'Vel_Filt']
+        
+        # EL FIX: El vector de acción correcto según tu tesis
+        columnas_accion = ['deltaXcmd', 'deltaYcmd', 'deltaZcmd', 'deltaRoll', 'deltaPitch', 'deltaYaw', 'Vel_Filt', 'Acc_Filt']
+
+        for archivo in archivos_csv:
+            df = pd.read_csv(archivo, header=0)
+            
+            # 1. Cálculo del diferencial de orientación con aritmética modular
+            df['deltaRoll'] = df['Roll'].diff().fillna(0.0)
+            df['deltaRoll'] = (df['deltaRoll'] + 180) % 360 - 180
+
+            df['deltaPitch'] = df['Pitch'].diff().fillna(0.0)
+            df['deltaPitch'] = (df['deltaPitch'] + 180) % 360 - 180
+
+            df['deltaYaw'] = df['Yaw'].diff().fillna(0.0)
+            df['deltaYaw'] = (df['deltaYaw'] + 180) % 360 - 180
+
+            # 2. Eliminación de la primera fila (ruido inicial del .diff)
+            df = df.iloc[1:].reset_index(drop=True)
+
+            try:
+                lista_x.append(df[columnas_observacion].to_numpy(dtype=np.float32))
+                lista_y.append(df[columnas_accion].to_numpy(dtype=np.float32))
+            except Exception as e: 
+                print(f"[ADVERTENCIA] Error leyendo columnas en {archivo}: {e}")
+                continue
+
+        X_raw = np.vstack(lista_x)
+        Y_raw = np.vstack(lista_y)
+        
+    except Exception as e: 
+        print(f"[ERROR] Hubo un problema general: {e}")
+        return
+
+    # ==========================================================
+    # NORMALIZACIÓN DE ENTRADAS (X) Y SALIDAS (Y)
+    # ==========================================================
+    mu_X = np.mean(X_raw, axis=0)
+    sigma_X = np.std(X_raw, axis=0) + 1e-8
+    X_data = (X_raw - mu_X) / sigma_X
+    np.save('norm_params_X_v3.3.npy', {'mu': mu_X, 'sigma': sigma_X})
+
+    mu_Y = np.mean(Y_raw, axis=0)
+    sigma_Y = np.std(Y_raw, axis=0) + 1e-8
+    Y_data = (Y_raw - mu_Y) / sigma_Y
+    np.save('norm_params_Y_v3.3.npy', {'mu': mu_Y, 'sigma': sigma_Y})
+    # ==========================================================
+
+    X_train, X_val, Y_train, Y_val = train_test_split(X_data, Y_data, test_size=0.15, random_state=42)
+    train_loader = DataLoader(XArmDataset(X_train, Y_train), batch_size=64, shuffle=True)
+    val_loader = DataLoader(XArmDataset(X_val, Y_val), batch_size=64, shuffle=False)
+
+    model = BehaviorCloningPolicy()
+    criterion = nn.HuberLoss(delta=1.0)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+
+    max_epochs = 10000
+    umbral_error = 0.000005       
+    train_losses, val_losses = [], []
+    best_val_loss = float('inf')
+
+    print("\n[INFO] Ciclo iniciado. Usa 'Ctrl+C' para detener el entrenamiento.\n")
+    try:
+        for epoch in range(max_epochs):
+            model.train()
+            running_train_loss = 0.0
+            for inputs, targets in train_loader:
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+                running_train_loss += loss.item()
+            
+            model.eval()
+            running_val_loss = 0.0
+            with torch.no_grad():
+                for inputs, targets in val_loader:
+                    outputs = model(inputs)
+                    running_val_loss += criterion(outputs, targets).item()
+            
+            avg_train_loss = running_train_loss / len(train_loader)
+            avg_val_loss = running_val_loss / len(val_loader)
+            train_losses.append(avg_train_loss); val_losses.append(avg_val_loss)
+            scheduler.step()
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(model.state_dict(), 'xarm5_policy_6D_v3.3.pth')
+
+            print(f"Epoch [{epoch+1}/{max_epochs}] | Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | Mejor: {best_val_loss:.6f}")
+            if best_val_loss <= umbral_error: break
+
+    except KeyboardInterrupt: print(f"\n[INFO] Detenido. Mejor Val Loss guardado: {best_val_loss:.6f}")
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Train Loss', color='blue')
+    plt.plot(val_losses, label='Validation Loss', color='orange')
+    plt.title('Curvas de Aprendizaje (v3.3 - Fix Cinemático + Acción)')
+    plt.xlabel('Épocas'); plt.ylabel('Huber Loss')
+    plt.grid(True, linestyle='--', alpha=0.7); plt.legend()
+    plt.savefig(f"training_loss_v3.3_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", dpi=300)
+    plt.show()
+
+if __name__ == "__main__": train_model()
+```
+
+
+
+
+
+
+
 ```bash
 python3 ejecutar_politica_isaac_v3.3.py
 ```
+
+```python
+from isaacsim import SimulationApp
+simulation_app = SimulationApp({"headless": False}) 
+
+import torch
+import numpy as np
+import pandas as pd
+import os, sys, time
+import tkinter as tk
+from tkinter import filedialog
+from omni.isaac.core import World
+from omni.isaac.core.articulations import ArticulationView 
+from omni.isaac.core.utils.stage import add_reference_to_stage
+
+class BehaviorCloningPolicy(torch.nn.Module):
+    def __init__(self, input_dim=15, output_dim=8):
+        super(BehaviorCloningPolicy, self).__init__()
+        self.red_neuronal = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, 256), torch.nn.ReLU(), torch.nn.Dropout(p=0.1), 
+            torch.nn.Linear(256, 500), torch.nn.ReLU(), torch.nn.Dropout(p=0.1),
+            torch.nn.Linear(500, 128), torch.nn.ReLU(), torch.nn.Dropout(p=0.1),
+            torch.nn.Linear(128, output_dim) 
+        )
+    def forward(self, state): return self.red_neuronal(state)
+
+print("[INFO] Inicializando IA Autónoma 6D (v3.3)...")
+modelo = BehaviorCloningPolicy()
+
+try:
+    modelo.load_state_dict(torch.load("xarm5_policy_6D_v3.3.pth", weights_only=True))
+    modelo.eval() 
+    
+    norm_X = np.load('norm_params_X_v3.3.npy', allow_pickle=True).item()
+    norm_Y = np.load('norm_params_Y_v3.3.npy', allow_pickle=True).item()
+    print("[INFO] Pesos y Doble Normalización cargados.")
+except Exception as e:
+    print(f"\n[ERROR] Faltan archivos o error al cargar: {e}")
+    simulation_app.close(); sys.exit()
+
+root = tk.Tk(); root.withdraw() 
+csv_path = filedialog.askopenfilename(title="Selecciona el CSV", filetypes=[("Archivos CSV", "*.csv")])
+if not csv_path: simulation_app.close(); sys.exit()
+
+# =====================================================================
+# EL FIX: PRE-PROCESAR EL CSV EXPERTO IGUAL QUE EN EL ENTRENAMIENTO
+# =====================================================================
+df_telemetria = pd.read_csv(csv_path)
+
+df_telemetria['deltaRoll'] = df_telemetria['Roll'].diff().fillna(0.0)
+df_telemetria['deltaRoll'] = (df_telemetria['deltaRoll'] + 180) % 360 - 180
+
+df_telemetria['deltaPitch'] = df_telemetria['Pitch'].diff().fillna(0.0)
+df_telemetria['deltaPitch'] = (df_telemetria['deltaPitch'] + 180) % 360 - 180
+
+df_telemetria['deltaYaw'] = df_telemetria['Yaw'].diff().fillna(0.0)
+df_telemetria['deltaYaw'] = (df_telemetria['deltaYaw'] + 180) % 360 - 180
+
+df_telemetria = df_telemetria.iloc[1:].reset_index(drop=True)
+# =====================================================================
+
+world = World(physics_dt=0.01, rendering_dt=0.01)
+world.scene.add_default_ground_plane()
+
+add_reference_to_stage(usd_path="/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/urdf/xarm5.usd", prim_path="/World/xarm5")
+xarm_view = ArticulationView(prim_paths_expr="/World/xarm5", name="xarm5_view")
+world.scene.add(xarm_view)
+world.reset()
+
+q_cmd = np.radians(df_telemetria.iloc[0][['q1', 'q2', 'q3', 'q4', 'q5']].values.astype(float))
+initial_positions = np.zeros((1, xarm_view.num_dof))
+initial_positions[0, :5] = q_cmd
+xarm_view.set_joint_positions(initial_positions)
+world.step(render=True)
+
+P_ia = np.zeros(3); P_vic = np.zeros(3)  
+historial_trayectorias = []
+tiempo_inicio = time.time()
+
+for paso_actual in range(len(df_telemetria)):
+    if not simulation_app.is_running(): break
+    fila = df_telemetria.iloc[paso_actual]
+    
+    F_sim = np.array([fila['Fx'], fila['Fy'], fila['Fz']]).astype(float)
+    T_sim = np.array([fila['Tx_EE'], fila['Ty_EE'], fila['Tz_EE']]).astype(float)
+    joint_positions_deg = np.degrees(xarm_view.get_joint_positions()[0][:5])
+    
+    estado_crudo = np.concatenate([F_sim, T_sim, joint_positions_deg, [fila['F_Amp'], fila['Beta'], fila['K_Stiffness'], fila['Vel_Filt']]])
+    
+    # 1. Escalar entradas (X)
+    estado_norm = (estado_crudo - norm_X['mu']) / norm_X['sigma']
+    
+    with torch.no_grad():
+        accion_norm = modelo(torch.FloatTensor(estado_norm)).numpy()
+        
+    # 2. Des-escalar predicciones (Y)
+    accion_real = (accion_norm * norm_Y['sigma']) + norm_Y['mu']
+        
+    deltas_xyz_mm = accion_real[0:3]
+    deltas_rpy_deg = accion_real[3:6]
+    
+    P_ia += deltas_xyz_mm
+    # Usamos los deltas corregidos que calculamos al principio
+    P_vic += np.array([fila['deltaXcmd'], fila['deltaYcmd'], fila['deltaZcmd']])
+    
+    historial_trayectorias.append({
+        'tiempo': fila.get('Time_s', paso_actual * 0.01),
+        'ia_x': P_ia[0], 'ia_y': P_ia[1], 'ia_z': P_ia[2],
+        'vic_x': P_vic[0], 'vic_y': P_vic[1], 'vic_z': P_vic[2]
+    })
+    
+    delta_6D = np.zeros(6)
+    delta_6D[0:3] = deltas_xyz_mm / 1000.0  
+    delta_6D[3:6] = np.radians(deltas_rpy_deg) 
+    
+    J_full = xarm_view.get_jacobians()[0][-1, 0:6, :5] 
+    delta_q_rad = np.linalg.pinv(J_full, rcond=1e-2) @ delta_6D
+    
+    q_cmd += delta_q_rad
+    target_pos = np.zeros((1, xarm_view.num_dof))
+    target_pos[0, :5] = q_cmd
+    xarm_view.set_joint_position_targets(target_pos)
+    
+    if paso_actual % 100 == 0: print(f"[{paso_actual}] Evaluando... Fz: {F_sim[2]:.2f} N")
+    world.step(render=True)
+
+df_resultados = pd.DataFrame(historial_trayectorias)
+df_resultados.to_csv("resultados_sim_to_sim.csv", index=False)
+simulation_app.close()
+```
+
 ```bash
 python3 graficar_tesis_v3.3.py
 ```
 
+```python
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
+import torch
+import torch.nn as nn
+import tkinter as tk
+from tkinter import filedialog
+import sys
+
+# =====================================================================
+# 1. DEFINICIÓN DE LA RED (Debe ser idéntica a la v3.3)
+# =====================================================================
+class BehaviorCloningPolicy(nn.Module):
+    def __init__(self, input_dim=15, output_dim=8):
+        super(BehaviorCloningPolicy, self).__init__()
+        self.red_neuronal = nn.Sequential(
+            nn.Linear(input_dim, 256), nn.ReLU(), nn.Dropout(p=0.1),
+            nn.Linear(256, 500), nn.ReLU(), nn.Dropout(p=0.1),
+            nn.Linear(500, 128), nn.ReLU(), nn.Dropout(p=0.1),
+            nn.Linear(128, output_dim)
+        )
+    def forward(self, x): 
+        return self.red_neuronal(x)
+
+# =====================================================================
+# 2. FUNCIÓN PRINCIPAL DE ANÁLISIS
+# =====================================================================
+def main():
+    print("[INFO] Generating 3x3 Validation Matrix (Grouped Legend & Metrics)...")
+    
+    root = tk.Tk()
+    root.withdraw()
+    csv_path = filedialog.askopenfilename(title="Select Expert CSV", filetypes=[("CSV Files", "*.csv")])
+    if not csv_path: sys.exit()
+
+    modelo = BehaviorCloningPolicy()
+    try:
+        modelo.load_state_dict(torch.load("xarm5_policy_6D_v3.3.pth", weights_only=True))
+        modelo.eval()
+        norm_X = np.load('norm_params_X_v3.3.npy', allow_pickle=True).item()
+        norm_Y = np.load('norm_params_Y_v3.3.npy', allow_pickle=True).item()
+    except Exception as e:
+        print(f"[ERROR] Loading weights or normalizers: {e}")
+        sys.exit()
+
+    df = pd.read_csv(csv_path, header=0)
+    
+    # Diferenciales modulares
+    df['deltaRoll'] = df['Roll'].diff().fillna(0.0)
+    df['deltaRoll'] = (df['deltaRoll'] + 180) % 360 - 180
+    df['deltaPitch'] = df['Pitch'].diff().fillna(0.0)
+    df['deltaPitch'] = (df['deltaPitch'] + 180) % 360 - 180
+    df['deltaYaw'] = df['Yaw'].diff().fillna(0.0)
+    df['deltaYaw'] = (df['deltaYaw'] + 180) % 360 - 180
+    df = df.iloc[1:].reset_index(drop=True)
+
+    columnas_observacion = ['Fx', 'Fy', 'Fz', 'Tx_EE', 'Ty_EE', 'Tz_EE', 'q1', 'q2', 'q3', 'q4', 'q5', 'F_Amp', 'Beta', 'K_Stiffness', 'Vel_Filt']
+    columnas_accion = ['deltaXcmd', 'deltaYcmd', 'deltaZcmd', 'deltaRoll', 'deltaPitch', 'deltaYaw', 'Vel_Filt', 'Acc_Filt']
+
+    X_raw = df[columnas_observacion].to_numpy(dtype=np.float32)
+    Y_real_raw = df[columnas_accion].to_numpy(dtype=np.float32)
+    tiempo = df['Time_s'].to_numpy(dtype=np.float32) if 'Time_s' in df.columns else np.arange(len(df)) * 0.01
+
+    X_norm = (X_raw - norm_X['mu']) / norm_X['sigma']
+    
+    # Y_real en espacio normalizado para la Gráfica 9
+    Y_real_norm = (Y_real_raw - norm_Y['mu']) / norm_Y['sigma']
+    
+    with torch.no_grad():
+        Y_pred_norm = modelo(torch.FloatTensor(X_norm)).numpy()
+
+    Y_pred_raw = (Y_pred_norm * norm_Y['sigma']) + norm_Y['mu']
+
+    # =====================================================================
+    # 5. CREACIÓN DE LA MATRIZ 3x3 DE GRÁFICAS
+    # =====================================================================
+    plt.rcParams.update({'font.size': 12, 'axes.labelweight': 'normal'})
+    fig, axs = plt.subplots(3, 3, figsize=(18, 13))
+    fig.suptitle('Behavior Cloning Validation (Inference vs Expert)', fontsize=22, fontweight='bold', y=0.98)
+    
+    metadata_graficas = [
+        {'etiqueta_y': r'$\Delta X$ [mm]'},
+        {'etiqueta_y': r'$\Delta Y$ [mm]'},
+        {'etiqueta_y': r'$\Delta Z$ [mm]'},
+        {'etiqueta_y': r'$\Delta Roll$ [°]'},
+        {'etiqueta_y': r'$\Delta Pitch$ [°]'},
+        {'etiqueta_y': r'$\Delta Yaw$ [°]'},
+        {'etiqueta_y': r'$Vel_{filt}$ [mm/s]'}, 
+        {'etiqueta_y': r'$Acc_{filt}$ [mm/s²]'}
+    ]
+
+    for i in range(8):
+        row, col = i // 3, i % 3
+        ax = axs[row, col]
+        
+        y_real = Y_real_raw[:, i]
+        y_pred = Y_pred_raw[:, i]
+        
+        error_absoluto = np.abs(y_real - y_pred)
+        error_cuadratico = (y_real - y_pred)**2
+        
+        mae_l1 = np.mean(error_absoluto)
+        mse_l2 = np.mean(error_cuadratico)
+        rmse_val = np.sqrt(mse_l2)
+        
+        ax.plot(tiempo, y_real, label='Real Output', color='black', alpha=0.75, linewidth=1.8)
+        ax.plot(tiempo, y_pred, label='Prediction Output', color='orange', linestyle='--', linewidth=1.5)
+        
+        ax.set_title("") 
+        if row == 2 or (row == 1 and col == 2): 
+             ax.set_xlabel('Time [s]', fontsize=12)
+        ax.set_ylabel(metadata_graficas[i]['etiqueta_y'], fontsize=12)
+        
+        ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+        
+        # Filtro de ruido
+        rango = np.max(np.abs(y_real))
+        if rango < 1e-4:
+            ax.set_ylim([-0.05, 0.05])
+        else:
+            min_y, max_y = np.min(y_real), np.max(y_real)
+            margen = (max_y - min_y) * 0.15
+            ax.set_ylim([min_y - margen, max_y + margen])
+            
+        ax.grid(True, linestyle=':', alpha=0.6)
+        
+        # UBICACIÓN AGRUPADA: Leyenda arriba a la derecha
+        ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+            
+        # UBICACIÓN AGRUPADA: Caja de métricas justo debajo de la leyenda
+        texto_metricas = f"L1: {mae_l1:.4f}\nL2: {mse_l2:.4f}\nRMSE: {rmse_val:.4f}"
+        props = dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='gray')
+        # Coordenadas (0.98, 0.70) para anclarlo debajo de la leyenda sin chocar con el borde
+        ax.text(0.98, 0.72, texto_metricas, transform=ax.transAxes, fontsize=10, fontweight='bold',
+                verticalalignment='top', horizontalalignment='right', bbox=props)
+
+    # -----------------------------------------------------------
+    # La 9na Gráfica: L1, L2 y RMSE (NORMALIZADO)
+    # -----------------------------------------------------------
+    ax9 = axs[2, 2]
+    
+    drift_norm = np.cumsum(Y_real_norm - Y_pred_norm, axis=0)
+    
+    error_L2_norm = np.linalg.norm(drift_norm, axis=1)
+    error_L1_norm = np.sum(np.abs(drift_norm), axis=1)
+    rmse_iterativo_norm = np.sqrt(np.cumsum(error_L2_norm**2) / np.arange(1, len(error_L2_norm) + 1))
+    
+    ax9.plot(tiempo, error_L1_norm, label='L1 Error', color='purple', linestyle=':', linewidth=1.8, alpha=0.8)
+    ax9.plot(tiempo, error_L2_norm, label='L2 Error', color='red', linewidth=1.8)
+    ax9.plot(tiempo, rmse_iterativo_norm, label='Cumulative RMSE', color='darkred', linestyle='-.', linewidth=2.0)
+    
+    ax9.fill_between(tiempo, error_L2_norm, color='red', alpha=0.1)
+    
+    ax9.set_title("")
+    ax9.set_xlabel('Time [s]', fontsize=12)
+    ax9.set_ylabel('Normalized Error', fontsize=12) 
+    
+    ax9.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+    ax9.grid(True, linestyle=':', alpha=0.6)
+    
+    # UBICACIÓN LEYENDA GLOBAL: Arriba a la izquierda (porque los datos crecen hacia la derecha)
+    ax9.legend(loc='upper left', fontsize=10, framealpha=0.9)
+
+    plt.tight_layout(rect=[0, 0.02, 1, 0.96]) 
+    
+    nombre_grafica = 'validation_matrix_3x3_Grouped.png'
+    plt.savefig(nombre_grafica, dpi=300, bbox_inches='tight')
+    print(f"✅ ¡Gráfica de validación con métricas agrupadas guardada como '{nombre_grafica}'!")
+    plt.show()
+
+if __name__ == "__main__":
+    main()
+```
 
 Durante las pruebas de robustez y transferencia, se identificaron vulnerabilidades críticas en la formulación discreta del control clásico y en la dimensionalidad de la política neuronal, requiriendo reestructuraciones fundamentales para viabilizar el despliegue.
 
