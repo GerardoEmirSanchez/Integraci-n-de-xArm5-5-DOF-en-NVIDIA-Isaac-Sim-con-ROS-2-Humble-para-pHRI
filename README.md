@@ -904,6 +904,85 @@ code ~/xarm_ws/src/xarm_ros2/xarm_description/ejecutar_politica_isaac_v2.2.py
 
 
 
+## 📈 Fase 17: Refinamiento Algorítmico, Estabilización Numérica y Arquitectura 6D
+
+Durante las pruebas de robustez y transferencia, se identificaron vulnerabilidades críticas en la formulación discreta del control clásico y en la dimensionalidad de la política neuronal, requiriendo reestructuraciones fundamentales para viabilizar el despliegue.
+
+### 17.1 Mitigación de la Bomba de Energía Numérica (Euler Semi-Implícito)
+Se sustituyó la integración de Euler Explícito por un esquema de Euler Semi-Implícito para el control de admitancia[cite: 6]. La formulación discreta anterior inducía un polo fuera del círculo unitario bajo variaciones bruscas de rigidez, actuando como una bomba de energía numérica e inestabilizando el sistema[cite: 6].
+* La nueva velocidad de comando se evalúa de forma implícita: $\dot{x}_c(k+1) = \frac{\dot{x}_c(k) + \frac{T}{M_d}[\hat{F}_{ext}(k) - K_d(k)(x_c(k) - x_{ref})]}{1 + \frac{T \cdot B_d(k)}{M_d}}$[cite: 6].
+* El polo característico se redefine como $z = [1 + \frac{T \cdot B_d(k)}{M_d}]^{-1}$[cite: 6].
+* Dado que los parámetros físicos son positivos, se garantiza que $z \in (0,1)$, asegurando la disipación asintótica de la energía elástica y proporcionando un amortiguamiento numérico que preserva la estabilidad física[cite: 6].
+
+### 17.2 Arquitectura "Time-Aware" 6D y Preprocesamiento
+Para solucionar el colapso del xArm5 virtual causado por el *Reality Gap* y el error compuesto (*Covariate Shift*) de los motores físicos (PhysX 5), se reestructuró el vector de observación y acción[cite: 7, 8].
+* **Ceguera a torques:** La red neuronal ahora es completamente ciega a los torques articulares $(\tau_1 \dots \tau_5)$ para evadir la dependencia de las fricciones no lineales y no modeladas[cite: 7, 8].
+* **Vector de Estado (15D):** Se inyectó explícitamente el diferencial temporal $\Delta t$ para inducir una integración tácita de la velocidad: $s_t = [\Delta t, F_x, F_y, F_z, T_x, T_y, T_z, Roll, Pitch, Yaw, q_1, q_2, q_3, q_4, q_5]$[cite: 7, 8].
+* **Vector de Acción (8D):** $a_t = [\Delta_X, \Delta_Y, \Delta_Z, \Delta_{Roll}, \Delta_{Pitch}, \Delta_{Yaw}, Vel_{filt}, Acc_{filt}]$[cite: 8].
+* **Acondicionamiento Numérico:** Se implementó una normalización Z-Score estricta ($z = (x - \mu) / (\sigma + 1e-8)$) y aritmética modular diferencial para los ángulos de Euler ($\Delta\theta_{\text{norm}} = ((\Delta\theta + 180^\circ) \bmod 360^\circ) - 180^\circ$)[cite: 7, 8].
+* Esto previene discontinuidades espaciales y la explosión de gradientes ante aceleraciones de alta magnitud[cite: 7, 8].
+* **Topología Parsimoniosa:** La red se redujo a la arquitectura $[15 \to 128 \to 128 \to 8]$ empleando Dropout ($p=0.15$) y función de pérdida Huber (Smooth L1) para suprimir valores atípicos del sensor OptoForce y prevenir el sobreajuste[cite: 7, 8].
+
+### 17.3 Cierre de Bucle Sim-to-Sim (Cinemática Inversa Subactuada)
+Dado que la tarea exige controlar 6 grados de libertad (6D) en el espacio operativo utilizando un manipulador de 5 grados de libertad (xArm5), el cálculo del error cartesiano requiere adaptar el mapeo cinemático[cite: 8].
+* Se implementó el Jacobiano Espacial asimétrico ($6 \times 5$) empleando la pseudo-inversa de Moore-Penrose: $\Delta q = J^\dagger(q) \Delta X_{6D}$[cite: 7, 8].
+* Esta formulación restringe al brazo subactuado para priorizar estrictamente la orientación RPY solicitada por la IA[cite: 8].
+
+### 17.4 Transición a Políticas Residuales (Enfoque TRANSIC)
+Para la futura fase de despliegue físico y mitigación de la brecha *Sim-to-Real*, el clonado de comportamiento (*Behavior Cloning*) fungirá exclusivamente como un *Warm-Start* inmutable ($\pi_B$) para Proximal Policy Optimization (PPO)[cite: 3, 7, 8].
+* Las variabilidades biomecánicas, la fatiga del operador y las fuerzas de fricción reales serán absorbidas por una Política Residual adaptable ($\pi_R$)[cite: 3, 8].
+* Esta política se entrenará a partir de las correcciones humanas en línea, mitigando el olvido catastrófico y aislando el conocimiento cinemático base[cite: 3, 8].
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
