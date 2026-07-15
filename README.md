@@ -906,6 +906,15 @@ code ~/xarm_ws/src/xarm_ros2/xarm_description/ejecutar_politica_isaac_v2.2.py
 
 ## 📈 Fase 17: Refinamiento Algorítmico, Estabilización Numérica y Arquitectura 6D
 
+```bash
+source ~/isaac_env/bin/activate
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/
+code .
+python3 entrenar_agente_bc_v3.3.py
+python3 ejecutar_politica_isaac_v3.3.py
+python3 graficar_tesis_v3.3.py
+```
+
 Durante las pruebas de robustez y transferencia, se identificaron vulnerabilidades críticas en la formulación discreta del control clásico y en la dimensionalidad de la política neuronal, requiriendo reestructuraciones fundamentales para viabilizar el despliegue.
 
 ### 17.1 Mitigación de la Bomba de Energía Numérica (Euler Semi-Implícito)
