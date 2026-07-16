@@ -911,10 +911,64 @@ source ~/isaac_env/bin/activate
 cd ~/xarm_ws/src/xarm_ros2/xarm_description/
 code .
 ```
+
+
+Durante las pruebas de robustez, se detectó la necesidad de refinar el mapeo matemático de las acciones. La política evolucionó a la **Versión 3.3**, incorporando ajustes algebraicos para estabilizar la inferencia continua y desarrollar una matriz de validación de formato científico (Camera-Ready).
+
+### 17.1 Corrección Matemática del Vector de Acción y Doble Normalización
+Se reestructuró la política de Behavior Cloning asegurando una coherencia cinemática estricta con el controlador de admitancia original del experto.
+
+* **Vector de Acción Corregido (8D):** El sistema ahora predice perfiles dinámicos precisos además de las posiciones espaciales.
+  $a_t = [\Delta X, \Delta Y, \Delta Z, \Delta Roll, \Delta Pitch, \Delta Yaw, Vel_{filt}, Acc_{filt}]$
+* **Aritmética Modular Diferencial:** Se aplicó un filtrado de módulo a los diferenciales de orientación (`(delta + 180) % 360 - 180`) tanto en la fase de entrenamiento como en la inferencia *Sim-to-Sim*. Esto elimina las discontinuidades angulares y previene comportamientos erráticos.
+* **Doble Normalización (Z-Score):** Se implementó un escalamiento estadístico bidireccional. Tanto las entradas observadas ($X$) como las acciones predictivas ($Y$) fueron normalizadas, guardando los parámetros `norm_params_X_v3.3.npy` y `norm_params_Y_v3.3.npy` para su reconstrucción física correcta.
+
+### 17.2 Matriz de Validación Cuantitativa 3x3
+Para certificar el aprendizaje del modelo, se desarrolló el script `graficar_tesis.py`. Este módulo de validación superpone los comandos inferidos por la red (en bucle abierto) contra los comandos ideales del experto humano (bucle cerrado) extraídos de la telemetría.
+
+El sistema calcula tres métricas de error estándar para cada variable de acción (visualizadas mediante agrupamiento dinámico sin oclusión de datos):
+* **L1 (MAE):** Error Absoluto Medio (robustez ante *outliers*).
+* **L2 (MSE):** Error Cuadrático Medio.
+* **RMSE:** Raíz del Error Cuadrático Medio.
+
+Además, se diseñó un **9no Panel Analítico** que integra el error Euclidiano y Manhattan del vector de estado completo (8D) mapeado en un espacio normalizado (adimensional) para evaluar la estabilidad a largo plazo.
+
+### 17.3 Conclusión del Behavior Cloning (Warm Start)
+
+<img width="5338" height="3737" alt="validation_matrix_3x3_Grouped" src="https://github.com/user-attachments/assets/278796dd-c843-43fa-8666-1e541ae4db0a" />
+
+El análisis empírico de la matriz 3x3 comprueba la hipótesis central y demuestra el límite teórico del *Behavior Cloning*:
+
+1. **Corto Plazo (Precisión Cinética Submilimétrica):** Las primeras 8 gráficas evidencian un clonado casi perfecto. La red mapea las fluctuaciones transitorias de velocidad y aceleración ($> 1000 \text{ mm/s}^2$) con fidelidad extrema. El RMSE en las traslaciones es consistentemente menor a **0.035 mm** por ciclo.
+2. **Largo Plazo (Dead-Reckoning Drift):** El 9no panel revela el fenómeno de *Deriva por Estima* (Covariate Shift). Al carecer de un lazo de retroalimentación espacial absoluto, el minúsculo error instantáneo de la red se integra matemáticamente paso a paso, generando un error acumulativo que aleja progresivamente al efector final de su coordenada ideal.
+
+**Siguiente Paso:** La topología neuronal actual (v3.3) es un rotundo éxito como estrategia de inicialización (**Warm Start**). El agente ha comprendido la dinámica subyacente y la ley de impedancia para pHRI. La **Fase 18** estará dedicada a importar estos pesos pre-entrenados a un entorno de **Aprendizaje por Refuerzo (Reinforcement Learning - PPO)**, donde la introducción de una función de recompensa espacial cerrará el lazo de control, eliminando la deriva estacionaria final.
+
+### 17.4 Anexo Técnico: Reproducción y Código Fuente (v3.3)
+
+Para replicar el entrenamiento, la ejecución *Sim-to-Sim* y la validación matemática de la versión final de la política (v3.3), el flujo de trabajo en la terminal es el siguiente:
+
+**1. Preparación del Entorno**
+```bash
+# Cargar variables de ROS 2 y activar el entorno de Isaac Sim / PyTorch
+source /opt/ros/humble/setup.bash
+source ~/isaac_env/bin/activate
+
+# Navegar al directorio de desarrollo
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/
+
+# Abrir el espacio de trabajo en Visual Studio Code
+code .
+```
+
+**2. Entrenamiento del modelo**
+A continuación, se documenta el código fuente definitivo de los tres pilares de esta fase metodológica:
+
+Este script carga la telemetría del experto, aplica aritmética modular a las orientaciones, ejecuta una doble normalización Z-Score, y entrena la topología [`15 -> 128 -> 128 -> 8`] usando Huber Loss.
+
 ```bash
 python3 entrenar_agente_bc_v3.3.py
 ```
-
 
 ```python
 import os
@@ -1070,11 +1124,8 @@ def train_model():
 if __name__ == "__main__": train_model()
 ```
 
-
-
-
-
-
+**3. Ejecucion de la politica en IsaacSim**
+Script que carga la red y los parámetros estadísticos, normalizando los estados percibidos y des-normalizando las predicciones en tiempo real para comandar el robot en el simulador mediante Cinemática Inversa (Pseudo-Inversa de Moore-Penrose).
 
 ```bash
 python3 ejecutar_politica_isaac_v3.3.py
@@ -1207,8 +1258,11 @@ for paso_actual in range(len(df_telemetria)):
 
 df_resultados = pd.DataFrame(historial_trayectorias)
 df_resultados.to_csv("resultados_sim_to_sim.csv", index=False)
-simulation_app.close()
+simulation_app.close()   
 ```
+
+**4. Graficas comparativas y validativas**
+Genera la Matriz de Validación 3x3 Formato IEEE (Camera-Ready), comparando visual y cuantitativamente (L1, L2, RMSE) el comportamiento del agente contra el controlador de admitancia. Adicionalmente modela el comportamiento estadístico de la Deriva (Dead-Reckoning Drift).
 
 ```bash
 python3 graficar_tesis_v3.3.py
@@ -1389,66 +1443,6 @@ def main():
 if __name__ == "__main__":
     main()
 ```
-
-Durante las pruebas de robustez y transferencia, se identificaron vulnerabilidades críticas en la formulación discreta del control clásico y en la dimensionalidad de la política neuronal, requiriendo reestructuraciones fundamentales para viabilizar el despliegue.
-
-### 17.1 Mitigación de la Bomba de Energía Numérica (Euler Semi-Implícito)
-
-Se sustituyó la integración de Euler Explícito por un esquema de Euler Semi-Implícito para el control de admitancia[cite: 6]. La formulación discreta anterior inducía un polo fuera del círculo unitario bajo variaciones bruscas de rigidez, actuando como una bomba de energía numérica e inestabilizando el sistema[cite: 6].
-
-* La nueva velocidad de comando se evalúa de forma implícita: $\dot{x}_c(k+1) = \frac{\dot{x}_c(k) + \frac{T}{M_d}[\hat{F}_{ext}(k) - K_d(k)(x_c(k) - x_{ref})]}{1 + \frac{T \cdot B_d(k)}{M_d}}$[cite: 6].
-* El polo característico se redefine como $z = [1 + \frac{T \cdot B_d(k)}{M_d}]^{-1}$[cite: 6].
-* Dado que los parámetros físicos son positivos, se garantiza que $z \in (0,1)$, asegurando la disipación asintótica de la energía elástica y proporcionando un amortiguamiento numérico que preserva la estabilidad física[cite: 6].
-
-### 17.2 Arquitectura "Time-Aware" 6D y Preprocesamiento
-Para solucionar el colapso del xArm5 virtual causado por el *Reality Gap* y el error compuesto (*Covariate Shift*) de los motores físicos (PhysX 5), se reestructuró el vector de observación y acción[cite: 7, 8].
-* **Ceguera a torques:** La red neuronal ahora es completamente ciega a los torques articulares $(\tau_1 \dots \tau_5)$ para evadir la dependencia de las fricciones no lineales y no modeladas[cite: 7, 8].
-* **Vector de Estado (15D):** Se inyectó explícitamente el diferencial temporal $\Delta t$ para inducir una integración tácita de la velocidad: $s_t = [\Delta t, F_x, F_y, F_z, T_x, T_y, T_z, Roll, Pitch, Yaw, q_1, q_2, q_3, q_4, q_5]$[cite: 7, 8].
-* **Vector de Acción (8D):** $a_t = [\Delta_X, \Delta_Y, \Delta_Z, \Delta_{Roll}, \Delta_{Pitch}, \Delta_{Yaw}, Vel_{filt}, Acc_{filt}]$[cite: 8].
-* **Acondicionamiento Numérico:** Se implementó una normalización Z-Score estricta ($z = (x - \mu) / (\sigma + 1e-8)$) y aritmética modular diferencial para los ángulos de Euler ($\Delta\theta_{\text{norm}} = ((\Delta\theta + 180^\circ) \bmod 360^\circ) - 180^\circ$)[cite: 7, 8].
-* Esto previene discontinuidades espaciales y la explosión de gradientes ante aceleraciones de alta magnitud[cite: 7, 8].
-* **Topología Parsimoniosa:** La red se redujo a la arquitectura $[15 \to 128 \to 128 \to 8]$ empleando Dropout ($p=0.15$) y función de pérdida Huber (Smooth L1) para suprimir valores atípicos del sensor OptoForce y prevenir el sobreajuste[cite: 7, 8].
-
-### 17.3 Cierre de Bucle Sim-to-Sim (Cinemática Inversa Subactuada)
-Dado que la tarea exige controlar 6 grados de libertad (6D) en el espacio operativo utilizando un manipulador de 5 grados de libertad (xArm5), el cálculo del error cartesiano requiere adaptar el mapeo cinemático[cite: 8].
-* Se implementó el Jacobiano Espacial asimétrico ($6 \times 5$) empleando la pseudo-inversa de Moore-Penrose: $\Delta q = J^\dagger(q) \Delta X_{6D}$[cite: 7, 8].
-* Esta formulación restringe al brazo subactuado para priorizar estrictamente la orientación RPY solicitada por la IA[cite: 8].
-
-### 17.4 Transición a Políticas Residuales (Enfoque TRANSIC)
-Para la futura fase de despliegue físico y mitigación de la brecha *Sim-to-Real*, el clonado de comportamiento (*Behavior Cloning*) fungirá exclusivamente como un *Warm-Start* inmutable ($\pi_B$) para Proximal Policy Optimization (PPO)[cite: 3, 7, 8].
-* Las variabilidades biomecánicas, la fatiga del operador y las fuerzas de fricción reales serán absorbidas por una Política Residual adaptable ($\pi_R$)[cite: 3, 8].
-* Esta política se entrenará a partir de las correcciones humanas en línea, mitigando el olvido catastrófico y aislando el conocimiento cinemático base[cite: 3, 8].
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
