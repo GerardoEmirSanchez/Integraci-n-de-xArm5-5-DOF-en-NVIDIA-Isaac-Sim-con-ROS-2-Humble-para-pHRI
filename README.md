@@ -1015,10 +1015,19 @@ def train_model():
         if not archivos_csv: return
             
         lista_x, lista_y = [], []
-        columnas_observacion = ['Fx', 'Fy', 'Fz', 'Tx_EE', 'Ty_EE', 'Tz_EE', 'q1', 'q2', 'q3', 'q4', 'q5', 'F_Amp', 'Beta', 'K_Stiffness', 'Vel_Filt']
+        # Corrección: Vector de Estado 15D alineado a la formulación teórica
+        columnas_observacion = ['Loop_Duration_s',                  # \Delta t
+                                'Fx', 'Fy', 'Fz',                   # Fuerzas (3D)
+                                'Tx_EE', 'Ty_EE', 'Tz_EE',          # Torques (3D)
+                                'Roll', 'Pitch', 'Yaw',             # Orientación Absoluta (3D)
+                                'q1', 'q2', 'q3', 'q4', 'q5'        # Cinemática Articular (5D)
+                                ]
         
         # EL FIX: El vector de acción correcto según tu tesis
-        columnas_accion = ['deltaXcmd', 'deltaYcmd', 'deltaZcmd', 'deltaRoll', 'deltaPitch', 'deltaYaw', 'Vel_Filt', 'Acc_Filt']
+        columnas_accion = ['deltaXcmd', 'deltaYcmd', 'deltaZcmd', 
+                           'deltaRoll', 'deltaPitch', 'deltaYaw', 
+                           'Vel_Filt', 'Acc_Filt'
+                           ]
 
         for archivo in archivos_csv:
             df = pd.read_csv(archivo, header=0)
@@ -1215,9 +1224,17 @@ for paso_actual in range(len(df_telemetria)):
     
     F_sim = np.array([fila['Fx'], fila['Fy'], fila['Fz']]).astype(float)
     T_sim = np.array([fila['Tx_EE'], fila['Ty_EE'], fila['Tz_EE']]).astype(float)
+    RPY_sim = np.array([fila['Roll'], fila['Pitch'], fila['Yaw']]).astype(float)
     joint_positions_deg = np.degrees(xarm_view.get_joint_positions()[0][:5])
     
-    estado_crudo = np.concatenate([F_sim, T_sim, joint_positions_deg, [fila['F_Amp'], fila['Beta'], fila['K_Stiffness'], fila['Vel_Filt']]])
+    # Construcción rigurosa del estado 15D (Time-Aware + Spatial-Aware)
+    estado_crudo = np.concatenate([
+        [fila.get('Loop_Duration_s', 0.01)],  # \Delta t
+        F_sim,                                # F_xyz
+        T_sim,                                # T_xyz
+        RPY_sim,                              # Orientación RPY
+        joint_positions_deg                   # q_1..5
+    ])
     
     # 1. Escalar entradas (X)
     estado_norm = (estado_crudo - norm_X['mu']) / norm_X['sigma']
@@ -1258,7 +1275,7 @@ for paso_actual in range(len(df_telemetria)):
 
 df_resultados = pd.DataFrame(historial_trayectorias)
 df_resultados.to_csv("resultados_sim_to_sim.csv", index=False)
-simulation_app.close()   
+simulation_app.close()
 ```
 
 **4. Graficas comparativas y validativas**
@@ -1326,9 +1343,18 @@ def main():
     df['deltaYaw'] = (df['deltaYaw'] + 180) % 360 - 180
     df = df.iloc[1:].reset_index(drop=True)
 
-    columnas_observacion = ['Fx', 'Fy', 'Fz', 'Tx_EE', 'Ty_EE', 'Tz_EE', 'q1', 'q2', 'q3', 'q4', 'q5', 'F_Amp', 'Beta', 'K_Stiffness', 'Vel_Filt']
-    columnas_accion = ['deltaXcmd', 'deltaYcmd', 'deltaZcmd', 'deltaRoll', 'deltaPitch', 'deltaYaw', 'Vel_Filt', 'Acc_Filt']
+    # Corrección alineada con la topología de la política neuronal
+    columnas_observacion = [
+        'Loop_Duration_s', 'Fx', 'Fy', 'Fz', 'Tx_EE', 'Ty_EE', 'Tz_EE', 
+        'Roll', 'Pitch', 'Yaw', 'q1', 'q2', 'q3', 'q4', 'q5'
+    ]
+    columnas_accion = [
+        'deltaXcmd', 'deltaYcmd', 'deltaZcmd', 
+        'deltaRoll', 'deltaPitch', 'deltaYaw', 
+        'Vel_Filt', 'Acc_Filt'
+    ]
 
+    
     X_raw = df[columnas_observacion].to_numpy(dtype=np.float32)
     Y_real_raw = df[columnas_accion].to_numpy(dtype=np.float32)
     tiempo = df['Time_s'].to_numpy(dtype=np.float32) if 'Time_s' in df.columns else np.arange(len(df)) * 0.01
