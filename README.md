@@ -935,7 +935,7 @@ Además, se diseñó un **9no Panel Analítico** que integra el error Euclidiano
 
 ### 17.3 Conclusión del Behavior Cloning (Warm Start)
 
-<img width="5338" height="3737" alt="validation_matrix_3x3_Grouped" src="https://github.com/user-attachments/assets/278796dd-c843-43fa-8666-1e541ae4db0a" />
+<img width="5338" height="3737" alt="validation_matrix_3x3_Grouped" src="https://github.com/user-attachments/assets/3f2e84a7-5afc-4df7-9334-9bbb4fc8efbe" />
 
 El análisis empírico de la matriz 3x3 comprueba la hipótesis central y demuestra el límite teórico del *Behavior Cloning*:
 
