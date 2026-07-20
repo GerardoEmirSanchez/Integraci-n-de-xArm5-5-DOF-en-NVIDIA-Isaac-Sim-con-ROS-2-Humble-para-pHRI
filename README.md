@@ -1445,30 +1445,67 @@ if __name__ == "__main__":
 ```
 
 
+## 📈 Fase 18 (En Proceso): Aprendizaje por Refuerzo (Cierre de Bucle con PPO)
+
+**El Objetivo Principal:**
+
+El modelo BC actual sabe cómo moverse (imita la dinámica de velocidad y aceleración), pero sufre de Deriva por Estima (Drift) porque no sabe dónde está respecto a la meta absoluta. En esta fase, tomaremos la red pre-entrenada de BC (el "Warm Start") y la pondremos en un entorno de ensayo y error (RL). Le daremos una Recompensa (Reward) cada vez que reduzca su error cartesiano, obligando a la red a "corregir" la deriva y cerrar el bucle de control.
+
+### 18.1. Requerimientos Técnicos y Entorno
+Para esta etapa, pasaremos de un script simple de inferencia a un entorno de entrenamiento distribuido. Necesitarás:
+
+1. **OmniIsaacGymEnvs (OIGE):** Es el framework oficial de NVIDIA para Aprendizaje por Refuerzo dentro de Isaac Sim. Está basado en Isaac Gym.
+    * Nota: No usaremos scripts aislados; integraremos tu brazo en la arquitectura de tareas (`Task`) de OIGE.
+2. **Librería `rl_games` o `Stable-Baselines3`:** Son los motores matemáticos que ejecutan el algoritmo PPO. OIGE usa `rl_games` por defecto por su extrema velocidad en simulaciones masivamente paralelas.
+3. **VRAM de la GPU:** PPO es un devorador de memoria porque no entrena un solo robot, entrena decenas o cientos de robots al mismo tiempo (Simulación Masivamente Paralela). Con tu RTX 4050 (6GB VRAM), probablemente entrenaremos unos 64 o 128 xArm5 simultáneos en modo Headless (sin gráficos).
+
+### 18.2. Bases Teóricas: El Algoritmo PPO (Proximal Policy Optimization)
+PPO es el estándar de oro en robótica actual. Es el mismo algoritmo que usa OpenAI para ChatGPT y el que usan en Boston Dynamics para estabilizar sus robots.
+
+#### 18.2.1 El Ecosistema Actor-Crítico (Actor-Critic)
+PPO no usa una sola red neuronal, usa dos (o una con dos cabezas de salida):El Actor (Policy Network - $\pi_\theta$): Es tu red actual (la que decide las acciones: $\Delta X, \Delta Y, Vel$, etc.).El Crítico (Value Network - $V_\phi$): Es una red nueva que aprenderá a "criticar" al Actor. Su único trabajo es mirar el Estado del robot y predecir: "¿Qué tan buena es esta situación a futuro?" (Estima el valor acumulado de las recompensas).
+
+#### 18.2.2 La Ecuación PPO (El "Clip")
+¿Por qué PPO y no otros algoritmos antiguos (como DQN o DDPG)? Porque PPO evita que el robot "olvide" lo que ya sabe (el olvido catastrófico). Lo hace "recortando" (clipping) qué tanto puede cambiar la red neuronal en un solo paso de entrenamiento.
 
 
+$$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min(r_t(\theta)\hat{A}_t, \text{clip}(r_t(\theta), 1 - \epsilon, 1 + \epsilon)\hat{A}_t) \right]$$
+
+* $r_t(\theta)$: La probabilidad de tomar una acción ahora vs. antes.
+* $\hat{A}_t$ (Ventaja): Qué tan mejor fue la acción tomada comparada con lo que el Crítico esperaba.
+* $\epsilon$: Margen de recorte (usualmente 0.2). Evita que la red cambie drásticamente sus pesos si descubre una acción "suertuda".
+
+Lo crucial para tu tesis: Al usar tu red BC como pesos iniciales, PPO será muy cuidadoso de no destruir la ley de admitancia que ya aprendió.
+
+#### 18.2.3. La Metodología (Paso a Paso)
+Construir un entorno RL desde cero es complejo. Lo dividiremos en las siguientes sub-etapas metodológicas:
+
+**Paso 1: Definición del MDP (Proceso de Decisión de Markov)**
+Debemos formalizar matemáticamente el entorno de tu cobot:
+* Estado ($S_t$): Los 15 valores que ya tienes (Fuerza, Posición, Tiempo). Añadiremos la posición de la meta ($X_{target}$).
+* Acción ($A_t$): Los 8 valores que ya tienes ($\Delta X, Vel, Acc$).
+* Recompensa ($R_t$): El corazón de la IA (se detalla abajo).
+
+**Paso 2: Diseño de la Función de Recompensa (Reward Shaping)**
+Esta es la parte más difícil e importante. Si le dices a la IA "te doy un punto si tocas la meta", se volverá loca y se moverá a $35,000 \text{ mm/s}^2$ ignorando la suavidad. La recompensa debe ser un polinomio denso:
+
+$$R_t = R_{distancia} + R_{suavidad} - P_{penalizacion}$$
+
+* $R_{distancia}$: Se maximiza cuando el error Euclidiano (que vimos en tu matriz) tiende a cero. (Usualmente una función Exponencial Inversa).
+* $R_{suavidad}$: Premia mantener las aceleraciones parecidas a las del experto.
+* $P_{penalizacion}$: Castiga a la IA si los motores del xArm5 intentan exceder sus límites de torque o articulación.
+
+**Paso 3: Construcción de la Tarea en Isaac Gym (`XArm5_Task.py`)**
+Escribiremos un script en Python que:
+1. Haga Spawn (instancie) de 64 xArm5 en una cuadrícula virtual.
+2. Calcule las recompensas para los 64 robots simultáneamente (usando PyTorch para operaciones matriciales en la GPU, no bucles `for`).
+3. Reinicie (Reset) a un robot individual si choca o se aleja demasiado.
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+**Paso 4: Entrenamiento con "Warm Start"**
+1. Cargaremos la red del Crítico con pesos aleatorios.
+2. Cargaremos la red del Actor con el archivo `xarm5_policy_6D_v3.3.pth` que acabamos de crear.
+3. Lanzaremos PPO. La red ya no empezará moviéndose al azar (sacudiéndose violentamente). Empezará moviéndose con la elegancia del experto, y PPO solo tendrá que "empujarla" unos milímetros hacia la meta para corregir la deriva.
 
 
 
