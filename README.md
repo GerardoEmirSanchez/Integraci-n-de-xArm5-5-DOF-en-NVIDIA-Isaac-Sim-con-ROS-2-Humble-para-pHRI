@@ -1486,6 +1486,20 @@ La política de *Behavior Cloning* (Fase 17) logró una precisión submilimétri
 Durante las primeras pruebas, el motor de físicas de Isaac Lab comprimió un experimento real de 21.41 segundos en apenas 1.30 segundos virtuales. Esto se debió a que el entorno sumaba iterativamente la variable `Loop_Duration_s` ($\Delta t \approx 0.0006$ s) para avanzar el tiempo. Al exigirle al robot velocidades imposibles para alcanzar la trayectoria, la penalización matemática explotó. 
 Se reescribió el módulo para anclar el reloj de la simulación directamente a la marca de tiempo absoluta (`Time_s`) muestreada a 100 Hz.
 
+**Protocolo de Acceso y Edición (Cold Start):**
+Para modificar este script desde una computadora recién encendida, abre una terminal (`Ctrl + Alt + T`) y ejecuta los siguientes comandos en orden:
+
+```bash
+# 1. Cargar las variables de entorno de ROS 2
+source /opt/ros/humble/setup.bash
+# 2. Activar el entorno virtual de Isaac Sim
+source ~/isaac_env/bin/activate
+# 3. Navegar directamente a la carpeta de PPO
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab
+# 4. Abrir el espacio de trabajo en Visual Studio Code
+code .
+```
+
 **Ruta:** `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/force_registry.py`
 
 ```python
