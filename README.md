@@ -1500,7 +1500,7 @@ cd ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab
 code .
 ```
 
-**Ruta:** `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/force_registry.py`
+`code ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/force_registry.py`
 
 ```python
 import torch
@@ -1601,7 +1601,7 @@ Para que PPO explore y aprenda de manera eficiente, no puede entrenar con un sol
 
 $$R_t = 0.1 - 50.0 \sum (q_{sim} - q_{experto})^2$$
 
-Ruta: `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/xarm5_env_cfg.py`
+`code ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/xarm5_env_cfg.py`
 
 ```python
 import torch
@@ -1732,7 +1732,7 @@ La decisión más crítica fue el cálculo matemático del `minibatch_size` para
 
 $$\text{Minibatch} = \frac{N_{actores} \times \text{Horizonte}}{\text{Bloques}} = \frac{16 \times 512}{4} = 2048$$
 
-Ruta: `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/train_ppo.py`
+`code ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/train_ppo.py`
 
 ```python
 import argparse
@@ -1862,7 +1862,7 @@ Tras 315 épocas, el algoritmo PPO convergió de manera estable. La función de 
 
 Para visualizar la política pre-entrenada en un escenario 3D. Se incluyó una interfaz `tkinter` para seleccionar el CSV a evaluar de forma dinámica.
 
-Ruta: `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/play_ppo.py`
+`code ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/play_ppo.py`
 
 ```python
 import argparse
