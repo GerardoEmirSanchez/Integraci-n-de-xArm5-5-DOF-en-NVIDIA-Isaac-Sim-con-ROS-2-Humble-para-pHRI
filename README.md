@@ -1471,67 +1471,506 @@ if __name__ == "__main__":
 ```
 
 
-## 📈 Fase 18 (En Proceso): Aprendizaje por Refuerzo (Cierre de Bucle con PPO)
-
-**El Objetivo Principal:**
-
-El modelo BC actual sabe cómo moverse (imita la dinámica de velocidad y aceleración), pero sufre de Deriva por Estima (Drift) porque no sabe dónde está respecto a la meta absoluta. En esta fase, tomaremos la red pre-entrenada de BC (el "Warm Start") y la pondremos en un entorno de ensayo y error (RL). Le daremos una Recompensa (Reward) cada vez que reduzca su error cartesiano, obligando a la red a "corregir" la deriva y cerrar el bucle de control.
-
-### 18.1. Requerimientos Técnicos y Entorno
-Para esta etapa, pasaremos de un script simple de inferencia a un entorno de entrenamiento distribuido. Necesitarás:
-
-1. **OmniIsaacGymEnvs (OIGE):** Es el framework oficial de NVIDIA para Aprendizaje por Refuerzo dentro de Isaac Sim. Está basado en Isaac Gym.
-    * Nota: No usaremos scripts aislados; integraremos tu brazo en la arquitectura de tareas (`Task`) de OIGE.
-2. **Librería `rl_games` o `Stable-Baselines3`:** Son los motores matemáticos que ejecutan el algoritmo PPO. OIGE usa `rl_games` por defecto por su extrema velocidad en simulaciones masivamente paralelas.
-3. **VRAM de la GPU:** PPO es un devorador de memoria porque no entrena un solo robot, entrena decenas o cientos de robots al mismo tiempo (Simulación Masivamente Paralela). Con tu RTX 4050 (6GB VRAM), probablemente entrenaremos unos 64 o 128 xArm5 simultáneos en modo Headless (sin gráficos).
-
-### 18.2. Bases Teóricas: El Algoritmo PPO (Proximal Policy Optimization)
-PPO es el estándar de oro en robótica actual. Es el mismo algoritmo que usa OpenAI para ChatGPT y el que usan en Boston Dynamics para estabilizar sus robots.
-
-#### 18.2.1 El Ecosistema Actor-Crítico (Actor-Critic)
-PPO no usa una sola red neuronal, usa dos (o una con dos cabezas de salida):El Actor (Policy Network - $\pi_\theta$): Es tu red actual (la que decide las acciones: $\Delta X, \Delta Y, Vel$, etc.).El Crítico (Value Network - $V_\phi$): Es una red nueva que aprenderá a "criticar" al Actor. Su único trabajo es mirar el Estado del robot y predecir: "¿Qué tan buena es esta situación a futuro?" (Estima el valor acumulado de las recompensas).
-
-#### 18.2.2 La Ecuación PPO (El "Clip")
-¿Por qué PPO y no otros algoritmos antiguos (como DQN o DDPG)? Porque PPO evita que el robot "olvide" lo que ya sabe (el olvido catastrófico). Lo hace "recortando" (clipping) qué tanto puede cambiar la red neuronal en un solo paso de entrenamiento.
 
 
-$$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min(r_t(\theta)\hat{A}_t, \text{clip}(r_t(\theta), 1 - \epsilon, 1 + \epsilon)\hat{A}_t) \right]$$
+## 🚀 Fase 18: Aprendizaje por Refuerzo (PPO) en Isaac Lab y Cierre de Bucle
 
-* $r_t(\theta)$: La probabilidad de tomar una acción ahora vs. antes.
-* $\hat{A}_t$ (Ventaja): Qué tan mejor fue la acción tomada comparada con lo que el Crítico esperaba.
-* $\epsilon$: Margen de recorte (usualmente 0.2). Evita que la red cambie drásticamente sus pesos si descubre una acción "suertuda".
+**Objetivo Principal:**
+La política de *Behavior Cloning* (Fase 17) logró una precisión submilimétrica a corto plazo, pero introdujo una "Deriva por Estima" (*Covariate Shift*) a largo plazo. Esta fase documenta la migración hacia el algoritmo de Aprendizaje por Refuerzo **Proximal Policy Optimization (PPO)**. Al inyectar una función de recompensa basada en el error espacial, se obliga a la red neuronal pre-entrenada a "cerrar el bucle", corrigiendo dinámicamente las desviaciones físicas.
 
-Lo crucial para tu tesis: Al usar tu red BC como pesos iniciales, PPO será muy cuidadoso de no destruir la ley de admitancia que ya aprendió.
+---
 
-#### 18.2.3. La Metodología (Paso a Paso)
-Construir un entorno RL desde cero es complejo. Lo dividiremos en las siguientes sub-etapas metodológicas:
+### 18.1 Resolución del Isomorfismo Temporal (force_registry.py)
 
-**Paso 1: Definición del MDP (Proceso de Decisión de Markov)**
-Debemos formalizar matemáticamente el entorno de tu cobot:
-* Estado ($S_t$): Los 15 valores que ya tienes (Fuerza, Posición, Tiempo). Añadiremos la posición de la meta ($X_{target}$).
-* Acción ($A_t$): Los 8 valores que ya tienes ($\Delta X, Vel, Acc$).
-* Recompensa ($R_t$): El corazón de la IA (se detalla abajo).
+**¿Por qué se hizo esto?**
+Durante las primeras pruebas, el motor de físicas de Isaac Lab comprimió un experimento real de 21.41 segundos en apenas 1.30 segundos virtuales. Esto se debió a que el entorno sumaba iterativamente la variable `Loop_Duration_s` ($\Delta t \approx 0.0006$ s) para avanzar el tiempo. Al exigirle al robot velocidades imposibles para alcanzar la trayectoria, la penalización matemática explotó. 
+Se reescribió el módulo para anclar el reloj de la simulación directamente a la marca de tiempo absoluta (`Time_s`) muestreada a 100 Hz.
 
-**Paso 2: Diseño de la Función de Recompensa (Reward Shaping)**
-Esta es la parte más difícil e importante. Si le dices a la IA "te doy un punto si tocas la meta", se volverá loca y se moverá a $35,000 \text{ mm/s}^2$ ignorando la suavidad. La recompensa debe ser un polinomio denso:
+**Ruta:** `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/force_registry.py`
 
-$$R_t = R_{distancia} + R_{suavidad} - P_{penalizacion}$$
+```python
+import torch
+import numpy as np
+import time
 
-* $R_{distancia}$: Se maximiza cuando el error Euclidiano (que vimos en tu matriz) tiende a cero. (Usualmente una función Exponencial Inversa).
-* $R_{suavidad}$: Premia mantener las aceleraciones parecidas a las del experto.
-* $P_{penalizacion}$: Castiga a la IA si los motores del xArm5 intentan exceder sus límites de torque o articulación.
+class ForceRegistry:
+    def __init__(self):
+        self.forces = None
+        self.torques = None
+        self.dts = None
+        self.target_qs = None 
+        self.time_series = None
+        
+        self.isaac_dt = 0.02     
+        self.current_sim_time = 0.0
+        self.is_active = False
+        self.start_real_time = 0.0
 
-**Paso 3: Construcción de la Tarea en Isaac Gym (`XArm5_Task.py`)**
-Escribiremos un script en Python que:
-1. Haga Spawn (instancie) de 64 xArm5 en una cuadrícula virtual.
-2. Calcule las recompensas para los 64 robots simultáneamente (usando PyTorch para operaciones matriciales en la GPU, no bucles `for`).
-3. Reinicie (Reset) a un robot individual si choca o se aleja demasiado.
+    def load_csv_data(self, df):
+        f_np = df[['Fx', 'Fy', 'Fz']].values.astype(np.float32)
+        t_np = df[['Tx_EE', 'Ty_EE', 'Tz_EE']].values.astype(np.float32)
+        q_np = df[['q1', 'q2', 'q3', 'q4', 'q5']].values.astype(np.float32) 
+        
+        # FIX TEMPORAL: Uso del tiempo físico real absoluto
+        if 'Time_s' in df.columns:
+            self.time_series = df['Time_s'].values.astype(np.float32)
+        else:
+            self.time_series = np.arange(len(df)) * 0.01
+
+        if 'Loop_Duration_s' in df.columns:
+            dts_np = df['Loop_Duration_s'].values.astype(np.float32)
+        else:
+            dts_np = np.full((len(df),), 0.01, dtype=np.float32)
+
+        self.forces = torch.tensor(f_np)
+        self.torques = torch.tensor(t_np)
+        self.dts = torch.tensor(dts_np)
+        self.target_qs = torch.tensor(q_np) 
+        
+        self.current_sim_time = 0.0
+        self.start_real_time = time.time()
+        self.is_active = True
+
+    def _interpolate_value(self, data_tensor, device, is_1d=False, dim=3):
+        if self.current_sim_time >= self.time_series[-1]:
+            if is_1d: return torch.full((1, 1), 0.02, device=device)
+            return torch.zeros((1, dim), device=device)
+            
+        if is_1d:
+            val = np.interp(self.current_sim_time, self.time_series, data_tensor.numpy())
+            return torch.tensor([[val]], device=device, dtype=torch.float32)
+        else:
+            vals = [np.interp(self.current_sim_time, self.time_series, data_tensor[:, i].numpy()) for i in range(dim)]
+            return torch.tensor([vals], device=device, dtype=torch.float32)
+
+    def get_current_forces(self, num_envs, device):
+        if self.is_active and self.forces is not None:
+            return self._interpolate_value(self.forces, device, dim=3).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 3), device=device)
+
+    def get_current_torques(self, num_envs, device):
+        if self.is_active and self.torques is not None:
+            return self._interpolate_value(self.torques, device, dim=3).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 3), device=device)
+        
+    def get_current_dt(self, num_envs, device):
+        if self.is_active and self.dts is not None:
+            return self._interpolate_value(self.dts, device, is_1d=True).repeat(num_envs, 1)
+        return torch.full((num_envs, 1), 0.02, device=device)
+        
+    def get_target_qs(self, num_envs, device):
+        if self.is_active and self.target_qs is not None:
+            return self._interpolate_value(self.target_qs, device, dim=5).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 5), device=device)
+
+    def advance_step(self):
+        if self.is_active:
+            self.current_sim_time += self.isaac_dt
+            if int(self.current_sim_time / self.isaac_dt) % 250 == 0:
+                real_time = time.time() - self.start_real_time
+                rtf = self.current_sim_time / real_time if real_time > 0 else 0
+                print(f"[RELOJ] T_Simulado: {self.current_sim_time:.2f}s / {self.time_series[-1]:.2f}s | T_Real: {real_time:.2f}s | RTF: {rtf:.2f}x")
+                  
+            if self.current_sim_time >= self.time_series[-1]:
+                tiempo_total = time.time() - self.start_real_time
+                print(f"\n[INFO] ¡CSV reproducido! Tiempo físico simulado: {self.current_sim_time:.2f}s | Tiempo real de PC: {tiempo_total:.2f}s")
+                self.is_active = False
+
+registry = ForceRegistry()
+```
 
 
-**Paso 4: Entrenamiento con "Warm Start"**
-1. Cargaremos la red del Crítico con pesos aleatorios.
-2. Cargaremos la red del Actor con el archivo `xarm5_policy_6D_v3.3.pth` que acabamos de crear.
-3. Lanzaremos PPO. La red ya no empezará moviéndose al azar (sacudiéndose violentamente). Empezará moviéndose con la elegancia del experto, y PPO solo tendrá que "empujarla" unos milímetros hacia la meta para corregir la deriva.
+### 18.2 Configuración del Entorno Vectorizado y Función de Recompensa (`xarm5_env_cfg.py`)
+
+**¿Por qué se hizo esto?**
+Para que PPO explore y aprenda de manera eficiente, no puede entrenar con un solo robot. Se vectorizó el entorno para instanciar 16 cobots simultáneos. Se estructuró el flujo de observaciones (15 dimensiones) y acciones (control cinemático inverso iterativo).La recompensa (`penalty_tracking`) se definió como el castigo exponencial basado en el Error Cuadrático Medio ($MSE$) entre las articulaciones simuladas y las expertas:
+
+$$R_t = 0.1 - 50.0 \sum (q_{sim} - q_{experto})^2$$
+
+Ruta: `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/xarm5_env_cfg.py`
+
+```python
+import torch
+import isaaclab.utils.math as math_utils
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import ObservationGroupCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab.actuators import ImplicitActuatorCfg
+from force_registry import registry
+
+@configclass
+class XArm5SceneCfg(InteractiveSceneCfg):
+    num_envs: int = 16 
+    env_spacing: float = 2.0
+    
+    ground = AssetBaseCfg(
+        prim_path="/World/ground",
+        spawn=sim_utils.GroundPlaneCfg()
+    )
+
+    robot: ArticulationCfg = ArticulationCfg(
+        prim_path="/World/envs/env_.*/xarm5",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/urdf/xarm5.usd",
+            activate_contact_sensors=True,
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            joint_pos={"joint1": 0.0, "joint2": 0.0, "joint3": 0.0, "joint4": 0.0, "joint5": 0.0},
+        ),
+        actuators={
+            "arm": ImplicitActuatorCfg(
+                joint_names_expr=["joint1", "joint2", "joint3", "joint4", "joint5"],
+                stiffness=400.0, damping=40.0,
+            ),
+        }
+    )
+
+@configclass
+class ActionsCfg:
+    arm_action: DifferentialInverseKinematicsActionCfg = DifferentialInverseKinematicsActionCfg(
+        asset_name="robot",
+        joint_names=["joint1", "joint2", "joint3", "joint4", "joint5"],
+        body_name="link5", 
+        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="pinv"),
+        scale=1.0,
+    )
+
+def dt_obs(env):
+    registry.advance_step()
+    return registry.get_current_dt(env.num_envs, env.device)
+
+def inyectar_fuerzas(env):
+    fuerzas = registry.get_current_forces(env.num_envs, env.device)
+    if not registry.is_active:
+        return fuerzas + ((torch.rand((env.num_envs, 3), device=env.device) * 0.02) - 0.01)
+    return fuerzas
+
+def inyectar_torques(env):
+    torques = registry.get_current_torques(env.num_envs, env.device)
+    if not registry.is_active:
+        return torques + ((torch.rand((env.num_envs, 3), device=env.device) * 0.002) - 0.001)
+    return torques
+
+def ee_rpy_obs(env):
+    robot = env.scene["robot"]
+    body_idx = robot.find_bodies("link5")[0][0]
+    quat_w = robot.data.body_state_w[:, body_idx, 3:7]
+    roll, pitch, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    return torch.stack([roll, pitch, yaw], dim=-1)
+
+def joint_pos_obs(env): return env.scene["robot"].data.joint_pos
+
+@configclass
+class ObservationsCfg:
+    @configclass
+    class PolicyCfg(ObservationGroupCfg):
+        dt = ObservationTermCfg(func=dt_obs)
+        forces = ObservationTermCfg(func=inyectar_fuerzas)
+        torques = ObservationTermCfg(func=inyectar_torques)
+        rpy = ObservationTermCfg(func=ee_rpy_obs)
+        joint_pos = ObservationTermCfg(func=joint_pos_obs)
+        
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+    policy: PolicyCfg = PolicyCfg()
+
+def tracking_error_penalty(env):
+    if not registry.is_active: return torch.zeros(env.num_envs, device=env.device)
+    q_actual = env.scene["robot"].data.joint_pos
+    q_experto = registry.get_target_qs(env.num_envs, env.device)
+    return torch.sum(torch.square(q_actual - q_experto), dim=1)
+
+@configclass
+class RewardsCfg:
+    esta_vivo = RewardTermCfg(func=lambda env: torch.ones(env.num_envs, device=env.device), weight=0.1)
+    penalty_tracking = RewardTermCfg(func=tracking_error_penalty, weight=-50.0)
+
+@configclass
+class TerminationsCfg:
+    time_out = TerminationTermCfg(func=lambda env: env.episode_length_buf >= env.max_episode_length)
+
+@configclass
+class XArm5EnvCfg(ManagerBasedRLEnvCfg):
+    def __post_init__(self):
+        self.scene = XArm5SceneCfg()
+        self.observations = ObservationsCfg()
+        self.actions = ActionsCfg()
+        self.rewards = RewardsCfg()
+        self.terminations = TerminationsCfg() 
+        self.decimation = 2 
+        self.episode_length_s = 25.0 
+        self.sim.dt = 0.01 
+        self.sim.render_interval = self.decimation
+```
+
+### 18.3 El Motor PPO y Blindaje Paramétrico (`train_ppo.py`)
+
+**¿Por qué se hizo esto?**
+La librería `rl_games` exige una topología estricta de diccionarios JSON. Cualquier variable faltante arroja un KeyError paralizando el simulador. Se consolidaron 21 hiperparámetros obligatorios.
+La decisión más crítica fue el cálculo matemático del `minibatch_size` para no desbordar los 6 GB de VRAM de la GPU RTX 4050:
+
+$$\text{Minibatch} = \frac{N_{actores} \times \text{Horizonte}}{\text{Bloques}} = \frac{16 \times 512}{4} = 2048$$
+
+Ruta: `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/train_ppo.py`
+
+```python
+import argparse
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Entrenamiento PPO Headless - pHRI")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import torch
+import pandas as pd
+import sys
+from isaaclab.envs import ManagerBasedRLEnv
+from xarm5_env_cfg import XArm5EnvCfg
+from force_registry import registry
+from rl_games.common import env_configurations, vecenv
+from rl_games.torch_runner import Runner
+from isaaclab_rl.rl_games import RlGamesVecEnvWrapper
+
+def main():
+    print("[INFO] Cargando entorno físico en modo Entrenamiento Headless...")
+    env_cfg = XArm5EnvCfg()
+    base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
+
+    vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
+    env_configurations.register('rlgpu', {'vecenv_type': 'RLGAMES', 'env_creator': lambda **kwargs: env})
+
+    csv_path = "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/mediciones/2026.04.28_VIC_pHRI_tanh_2026-04-28_12-26-59.csv"
+    print(f"\n[INFO] Leyendo trayectoria experta desde: {csv_path}")
+    try:
+        df = pd.read_csv(csv_path)
+        registry.load_csv_data(df)
+    except Exception as e:
+        print(f"[ERROR CRÍTICO] No se pudo cargar el CSV: {e}")
+        base_env.close(); sys.exit()
+
+    ppo_config = {
+        "params": {
+            "seed": 42,
+            "algo": {"name": "a2c_continuous"},
+            "model": {"name": "continuous_a2c_logstd"},
+            "network": {
+                "name": "actor_critic",
+                "separate": False,
+                "space": {
+                    "continuous": {
+                        "mu_activation": "None", "sigma_activation": "None",
+                        "mu_init": {"name": "default"}, "sigma_init": {"name": "const_initializer", "val": 0.0},
+                        "fixed_sigma": True
+                    }
+                },
+                "mlp": {"units": [256, 128, 64], "activation": "elu", "initializer": {"name": "default"}, "regularizer": {"name": "None"}} 
+            },
+            "load_checkpoint": True,
+            "load_path": "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/xarm5_policy_6D_v3.3.pth", 
+            "config": {
+                "name": "xarm5_phri_ppo", "env_name": "rlgpu", "device": "cuda:0", "ppo": True,
+                "mixed_precision": False, "normalize_input": False, "normalize_value": False,
+                "normalize_advantage": True, "value_bootstrap": True, "num_actors": base_env.num_envs,
+                "reward_shaper": {"scale_value": 1.0},
+                
+                # --- HIPERPARÁMETROS ANTI-KEYERROR ---
+                "learning_rate": 3e-4, "lr_schedule": "adaptive", "schedule_type": "standard", "kl_threshold": 0.008,
+                "horizon_length": 512, "minibatch_size": 2048, "mini_epochs": 4, "max_epochs": 5000,
+                "save_best_after": 10, "save_frequency": 50, "print_stats": True, "grad_norm": 1.0,
+                "entropy_coef": 0.0, "truncate_grads": True, "e_clip": 0.2, "clip_value": True,
+                "critic_coef": 2.0, "bounds_loss_coef": 0.0001, "gamma": 0.99, "tau": 0.95,
+                "score_to_win": 100000, "use_smooth_clamp": False, "weight_decay": 0.0,
+                "player": {"deterministic": True, "games_num": 1000000}
+            }
+        }
+    }
+
+    print("[INFO] Inyectando red neuronal y arrancando bucle de ENTRENAMIENTO...")
+    runner = Runner()
+    runner.load(ppo_config)
+    runner.run({'train': True, 'play': False})
+    base_env.close()
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
+```
+
+### 18.4 Protocolo de Arranque en Frío (Cold Start) y TensorBoard
+
+Para ejecutar este entrenamiento desde una PC recién encendida, se debe inhabilitar el renderizado volumétrico de la interfaz de Omniverse (`--headless`). Esto permite acelerar radicalmente el aprendizaje de la red neuronal.
+
+1. Preparar la Consola Principal (Entrenamiento)
+Abre la terminal y ejecuta:
+
+```bash
+source ~/isaac_env/bin/activate
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab
+python3 train_ppo.py --headless
+```
+
+No interrumpas esta consola. PPO guardará un punto de control (`.pth`) cada vez que logre una mejor recompensa.
+
+2. Solucionar dependencias y Lanzar TensorBoard
+TensorBoard requiere el módulo `pkg_resources`. Dado que las versiones recientes de `setuptools` lo eliminaron, abre una segunda pestaña en la terminal y ejecuta este downgrade antes de lanzar las gráficas:
+
+```bash
+source ~/isaac_env/bin/activate
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab
+pip install "setuptools<70.0.0"
+tensorboard --logdir runs/
+```
+
+Abre tu navegador en `http://localhost:6006/` para observar la telemetría en tiempo real.
+
+**Resultados del Entrenamiento (TensorBoard)**
+
+Tras 315 épocas, el algoritmo PPO convergió de manera estable. La función de valor del Crítico (c_loss) se redujo a cero, y la penalización de seguimiento se estabilizó horizontalmente en un reward constante de 2.499.
+
+<img width="1213" height="853" alt="Captura desde 2026-07-23 17-33-19" src="https://github.com/user-attachments/assets/bca5b9bb-38af-483e-8985-fdb50b8d4169" />
+**Imagen 1: Descenso de entropía y función de valor del Crítico demostrando la confianza del modelo**
+
+<img width="1213" height="442" alt="Captura desde 2026-07-23 17-02-05" src="https://github.com/user-attachments/assets/015a4718-0a3d-4263-8650-d4460d822fef" />
+**Imagen 2: La asíntota de recompensa confirma el alineamiento exitoso a la trayectoria experta anulando el error MSE**
+
+### 18.5 Script de Evaluación Visual (`play_ppo.py`) y Diagnóstico de Sobreajuste
+**¿Por qué se hizo esto?**
+
+Para visualizar la política pre-entrenada en un escenario 3D. Se incluyó una interfaz `tkinter` para seleccionar el CSV a evaluar de forma dinámica.
+
+Ruta: `~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/play_ppo.py`
+
+```python
+import argparse
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Evaluación PPO - Visión 3D")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import torch
+import pandas as pd
+import sys
+import tkinter as tk
+from tkinter import filedialog
+import os
+
+from isaaclab.envs import ManagerBasedRLEnv
+from xarm5_env_cfg import XArm5EnvCfg
+from force_registry import registry
+from rl_games.common import env_configurations, vecenv
+from rl_games.torch_runner import Runner
+from isaaclab_rl.rl_games import RlGamesVecEnvWrapper
+
+def main():
+    print("[INFO] Cargando entorno físico en modo Evaluación (3D)...")
+    env_cfg = XArm5EnvCfg()
+    base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
+    vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
+    env_configurations.register('rlgpu', {'vecenv_type': 'RLGAMES', 'env_creator': lambda **kwargs: env})
+
+    # === SELECCIÓN POR EXPLORADOR DE ARCHIVOS ===
+    print("\n" + "="*70)
+    print(" EVALUACIÓN 3D - CONTROL DE IMPEDANCIA")
+    print("="*70)
+    
+    root = tk.Tk()
+    root.withdraw() 
+    csv_path = filedialog.askopenfilename(
+        title="Selecciona el archivo CSV experto",
+        filetypes=[("Archivos CSV", "*.csv"), ("Todos los archivos", "*.*")]
+    )
+    root.destroy() 
+
+    if not csv_path:
+        print("[ERROR CRÍTICO] Cancelado por el usuario.")
+        base_env.close(); sys.exit()
+
+    try:
+        df = pd.read_csv(csv_path)
+        registry.load_csv_data(df)
+        print(f"[EXITO] CSV Cargado.")
+    except Exception as e:
+        print(f"[ERROR CRÍTICO] {e}")
+        base_env.close(); sys.exit()
+
+    ppo_config = {
+        "params": {
+            "seed": 42, "algo": {"name": "a2c_continuous"}, "model": {"name": "continuous_a2c_logstd"},
+            "network": {
+                "name": "actor_critic", "separate": False,
+                "space": {"continuous": {"mu_activation": "None", "sigma_activation": "None", "fixed_sigma": True}},
+                "mlp": {"units": [256, 128, 64], "activation": "elu"} 
+            },
+            "load_checkpoint": True,
+            # RUTA DEL CHECKPOINT ENTRENADO
+            "load_path": "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/runs/xarm5_phri_ppo_23-16-39-33/nn/xarm5_phri_ppo.pth", 
+            "config": {
+                "name": "xarm5_phri_ppo", "env_name": "rlgpu", "device": "cuda:0", "ppo": True,
+                "num_actors": base_env.num_envs, "horizon_length": 512, "minibatch_size": 2048,
+                "player": {"deterministic": True, "games_num": 1000000}
+            }
+        }
+    }
+
+    print("[INFO] Arrancando bucle de EVALUACIÓN...")
+    runner = Runner()
+    runner.load(ppo_config)
+    runner.run({'train': False, 'play': True})
+    base_env.close()
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
+```
+
+### El Diagnóstico: Overfitting al Dominio Temporal
+
+Al ejecutar la simulación gráfica (`python3 play_ppo.py`), se descubrió una desviación conductual. Al deshabilitar la ingesta de fuerza externa ($F = 0$), el manipulador continuó ejecutando la trayectoria.
+
+**Conclusión de la Fase 18:**
+Al entrenar al algoritmo PPO de forma iterativa sobre un único archivo CSV, la red neuronal encontró un atajo matemático. Ignoró la dinámica del sensor de fuerza y generó un mapeo directo entre el reloj de la simulación y las posiciones de las articulaciones; memorizó el video en lugar de aprender la ley de complianza física.
+
+La Fase 19 abordará este sesgo de sobreajuste implementando una generalización estocástica (Data Augmentation) ingiriendo carpetas masivas de trayectorias encadenadas.
+
+## 🚀 Fase 19 (Propuesta): Generalización de la Ley de Impedancia mediante Aumento de Datos Masivo
+
+El hallazgo de la Fase 18 demuestra empíricamente que someter un modelo de control a trayectorias estáticas destruye la relación de causalidad entre la fuerza externa medida ($F_{ext}$) y el desplazamiento compliante dictado por la ley $M\ddot{x} + D\dot{x} + Kx = F_{ext}$. La Fase 19 propone la erradicación del sesgo temporal para forzar el aprendizaje de una política puramente reactiva e informada por la física.
+
+### 19.1 Ingesta Masiva y Concatenación Cronológica (Data Augmentation)
+Se implementará una reestructuración del conducto de datos (*pipeline*) utilizando las librerías `glob` y `tkinter`. El sistema de entrenamiento ya no ingerirá una trayectoria individual, sino que procesará de forma automatizada directorios completos de experimentos físicos con variabilidad en magnitud, dirección y cadencia de las perturbaciones.
+
+Para prevenir el colapso de las funciones de interpolación, los archivos CSV serán encadenados cronológicamente mediante un desplazamiento iterativo de la base temporal:
+
+$$t_{absoluto} = t_{archivo\_actual} + t_{acumulado\_previo}$$
+
+Esto construirá una super-trayectoria continua de múltiples minutos, obligando a la política iterativa a correlacionar la desviación de la meta exclusivamente con las lecturas dinámicas del vector de estado.
+
+### 19.2 Evaluación Interactiva Ciega (Zero-Force Test)
+Se desarrollará una herramienta de evaluación visual (`play_ppo.py`) dotada de una interfaz gráfica de selección, desconectada del conjunto de datos de entrenamiento. El protocolo de validación exigirá dos comprobaciones teóricas críticas:
+
+*   **Ensayo Nulo:** Al inyectar un tensor de fuerzas nulo ($\mathbf{F} = \mathbf{0}$), la salida de la red neuronal debe ser invariante, manteniendo el manipulador en estado estático absoluto.
+*   **Ensayo Aleatorio:** Frente a la inyección de CSVs ajenos a la distribución de entrenamiento, el agente debe generar desplazamientos cartesianos proporcionales a las fuerzas leídas, retornando a su estado nominal al cesar la perturbación.
+
+Esta reestructuración algorítmica garantizará que los tensores resultantes posean capacidades de generalización estructural, sentando la validación final del esquema de Control de Impedancia Variable mediante Aprendizaje por Refuerzo para transferencia *Sim-to-Real*.
+
+
+
+
+
 
 
 
