@@ -2393,7 +2393,9 @@ Durante la ejecución continua de madrugada, la telemetría del motor evidenció
 La inyección masiva de datos cumplió su objetivo primordial: erradicar el atajo temporal. Sin embargo, las métricas extraídas vía TensorBoard revelan un fracaso en la convergencia espacial del agente.
 
 
-<img width="1920" height="1200" alt="Captura desde 2026-07-24 12-04-56" src="https://github.com/user-attachments/assets/278ac317-27c7-4aab-bd3d-b4c45e853882" />
+<img width="1850" height="1173" alt="Captura desde 2026-07-24 13-26-56" src="https://github.com/user-attachments/assets/5d16957d-b732-48d1-960d-f9a0bee3c1cf" />
+<img width="1850" height="1173" alt="Captura desde 2026-07-24 13-26-01" src="https://github.com/user-attachments/assets/5df6f995-36d6-4bb8-94b7-f94865be9552" />
+
 
 **(Imagen 2: Telemetría de TensorBoard demostrando la desestabilización asintótica en la recompensa y el error del crítico.)**
 
