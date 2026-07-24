@@ -1525,12 +1525,13 @@ class ForceRegistry:
         t_np = df[['Tx_EE', 'Ty_EE', 'Tz_EE']].values.astype(np.float32)
         q_np = df[['q1', 'q2', 'q3', 'q4', 'q5']].values.astype(np.float32) 
         
-        # FIX TEMPORAL: Uso del tiempo físico real absoluto
+        # El tiempo físico real dictado por tu sensor
         if 'Time_s' in df.columns:
             self.time_series = df['Time_s'].values.astype(np.float32)
         else:
             self.time_series = np.arange(len(df)) * 0.01
 
+        # El delta t interno exclusivo para la red neuronal (15D)
         if 'Loop_Duration_s' in df.columns:
             dts_np = df['Loop_Duration_s'].values.astype(np.float32)
         else:
@@ -1546,10 +1547,12 @@ class ForceRegistry:
         self.is_active = True
 
     def _interpolate_value(self, data_tensor, device, is_1d=False, dim=3):
+        # Si terminamos el CSV, devolvemos ceros
         if self.current_sim_time >= self.time_series[-1]:
             if is_1d: return torch.full((1, 1), 0.02, device=device)
             return torch.zeros((1, dim), device=device)
             
+        # Interpolación lineal en tiempo asíncrono
         if is_1d:
             val = np.interp(self.current_sim_time, self.time_series, data_tensor.numpy())
             return torch.tensor([[val]], device=device, dtype=torch.float32)
@@ -1578,8 +1581,10 @@ class ForceRegistry:
         return torch.zeros((num_envs, 5), device=device)
 
     def advance_step(self):
+        # Avanza el reloj de Isaac Lab y muestra métricas
         if self.is_active:
             self.current_sim_time += self.isaac_dt
+            
             if int(self.current_sim_time / self.isaac_dt) % 250 == 0:
                 real_time = time.time() - self.start_real_time
                 rtf = self.current_sim_time / real_time if real_time > 0 else 0
@@ -1587,7 +1592,7 @@ class ForceRegistry:
                   
             if self.current_sim_time >= self.time_series[-1]:
                 tiempo_total = time.time() - self.start_real_time
-                print(f"\n[INFO] ¡CSV reproducido! Tiempo físico simulado: {self.current_sim_time:.2f}s | Tiempo real de PC: {tiempo_total:.2f}s")
+                print(f"\n[INFO] ¡CSV reproducido! Tiempo físico simulado: {self.current_sim_time:.2f}s | Tiempo real de tu PC: {tiempo_total:.2f}s")
                 self.is_active = False
 
 registry = ForceRegistry()
@@ -1606,15 +1611,18 @@ $$R_t = 0.1 - 50.0 \sum (q_{sim} - q_{experto})^2$$
 ```python
 import torch
 import isaaclab.utils.math as math_utils
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
+
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 from isaaclab.actuators import ImplicitActuatorCfg
+
 from force_registry import registry
 
 @configclass
@@ -1635,12 +1643,16 @@ class XArm5SceneCfg(InteractiveSceneCfg):
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
-            joint_pos={"joint1": 0.0, "joint2": 0.0, "joint3": 0.0, "joint4": 0.0, "joint5": 0.0},
+            joint_pos={
+                "joint1": 0.0, "joint2": 0.0, "joint3": 0.0,
+                "joint4": 0.0, "joint5": 0.0,
+            },
         ),
         actuators={
             "arm": ImplicitActuatorCfg(
                 joint_names_expr=["joint1", "joint2", "joint3", "joint4", "joint5"],
-                stiffness=400.0, damping=40.0,
+                stiffness=400.0,
+                damping=40.0,
             ),
         }
     )
@@ -1651,7 +1663,11 @@ class ActionsCfg:
         asset_name="robot",
         joint_names=["joint1", "joint2", "joint3", "joint4", "joint5"],
         body_name="link5", 
-        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="pinv"),
+        controller=DifferentialIKControllerCfg(
+            command_type="pose", 
+            use_relative_mode=True,
+            ik_method="pinv"
+        ),
         scale=1.0,
     )
 
@@ -1662,13 +1678,15 @@ def dt_obs(env):
 def inyectar_fuerzas(env):
     fuerzas = registry.get_current_forces(env.num_envs, env.device)
     if not registry.is_active:
-        return fuerzas + ((torch.rand((env.num_envs, 3), device=env.device) * 0.02) - 0.01)
+        ruido = (torch.rand((env.num_envs, 3), device=env.device) * 0.02) - 0.01
+        return fuerzas + ruido
     return fuerzas
 
 def inyectar_torques(env):
     torques = registry.get_current_torques(env.num_envs, env.device)
     if not registry.is_active:
-        return torques + ((torch.rand((env.num_envs, 3), device=env.device) * 0.002) - 0.001)
+        ruido_t = (torch.rand((env.num_envs, 3), device=env.device) * 0.002) - 0.001
+        return torques + ruido_t
     return torques
 
 def ee_rpy_obs(env):
@@ -1678,7 +1696,8 @@ def ee_rpy_obs(env):
     roll, pitch, yaw = math_utils.euler_xyz_from_quat(quat_w)
     return torch.stack([roll, pitch, yaw], dim=-1)
 
-def joint_pos_obs(env): return env.scene["robot"].data.joint_pos
+def joint_pos_obs(env):
+    return env.scene["robot"].data.joint_pos
 
 @configclass
 class ObservationsCfg:
@@ -1693,13 +1712,17 @@ class ObservationsCfg:
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = True
+    
     policy: PolicyCfg = PolicyCfg()
 
 def tracking_error_penalty(env):
     if not registry.is_active: return torch.zeros(env.num_envs, device=env.device)
+    
     q_actual = env.scene["robot"].data.joint_pos
     q_experto = registry.get_target_qs(env.num_envs, env.device)
-    return torch.sum(torch.square(q_actual - q_experto), dim=1)
+    
+    error = torch.sum(torch.square(q_actual - q_experto), dim=1)
+    return error
 
 @configclass
 class RewardsCfg:
@@ -1718,8 +1741,10 @@ class XArm5EnvCfg(ManagerBasedRLEnvCfg):
         self.actions = ActionsCfg()
         self.rewards = RewardsCfg()
         self.terminations = TerminationsCfg() 
+        
         self.decimation = 2 
         self.episode_length_s = 25.0 
+        
         self.sim.dt = 0.01 
         self.sim.render_interval = self.decimation
 ```
@@ -1738,7 +1763,7 @@ $$\text{Minibatch} = \frac{N_{actores} \times \text{Horizonte}}{\text{Bloques}} 
 import argparse
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Entrenamiento PPO Headless - pHRI")
+parser = argparse.ArgumentParser(description="Entrenamiento PPO Headless - Clonación de Comportamiento")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
@@ -1747,6 +1772,7 @@ simulation_app = app_launcher.app
 import torch
 import pandas as pd
 import sys
+
 from isaaclab.envs import ManagerBasedRLEnv
 from xarm5_env_cfg import XArm5EnvCfg
 from force_registry import registry
@@ -1758,19 +1784,26 @@ def main():
     print("[INFO] Cargando entorno físico en modo Entrenamiento Headless...")
     env_cfg = XArm5EnvCfg()
     base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    
     env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
 
     vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
-    env_configurations.register('rlgpu', {'vecenv_type': 'RLGAMES', 'env_creator': lambda **kwargs: env})
+
+    env_configurations.register('rlgpu', {
+        'vecenv_type': 'RLGAMES',
+        'env_creator': lambda **kwargs: env
+    })
 
     csv_path = "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/mediciones/2026.04.28_VIC_pHRI_tanh_2026-04-28_12-26-59.csv"
     print(f"\n[INFO] Leyendo trayectoria experta desde: {csv_path}")
     try:
         df = pd.read_csv(csv_path)
         registry.load_csv_data(df)
+        print(f"[EXITO] Interpolación temporal activa sobre {len(df)} muestras.")
     except Exception as e:
         print(f"[ERROR CRÍTICO] No se pudo cargar el CSV: {e}")
-        base_env.close(); sys.exit()
+        base_env.close()
+        sys.exit()
 
     ppo_config = {
         "params": {
@@ -1782,29 +1815,64 @@ def main():
                 "separate": False,
                 "space": {
                     "continuous": {
-                        "mu_activation": "None", "sigma_activation": "None",
-                        "mu_init": {"name": "default"}, "sigma_init": {"name": "const_initializer", "val": 0.0},
+                        "mu_activation": "None", 
+                        "sigma_activation": "None",
+                        "mu_init": {"name": "default"},
+                        "sigma_init": {"name": "const_initializer", "val": 0.0},
                         "fixed_sigma": True
                     }
                 },
-                "mlp": {"units": [256, 128, 64], "activation": "elu", "initializer": {"name": "default"}, "regularizer": {"name": "None"}} 
+                "mlp": {
+                    "units": [256, 128, 64], 
+                    "activation": "elu",
+                    "initializer": {"name": "default"},
+                    "regularizer": {"name": "None"}
+                } 
             },
             "load_checkpoint": True,
             "load_path": "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/xarm5_policy_6D_v3.3.pth", 
             "config": {
-                "name": "xarm5_phri_ppo", "env_name": "rlgpu", "device": "cuda:0", "ppo": True,
-                "mixed_precision": False, "normalize_input": False, "normalize_value": False,
-                "normalize_advantage": True, "value_bootstrap": True, "num_actors": base_env.num_envs,
+                "name": "xarm5_phri_ppo",
+                "env_name": "rlgpu",
+                "device": "cuda:0",
+                "ppo": True,
+                "mixed_precision": False,
+                "normalize_input": False,  
+                "normalize_value": False,
+                "normalize_advantage": True,
+                "value_bootstrap": True,
+                "num_actors": base_env.num_envs,
                 "reward_shaper": {"scale_value": 1.0},
                 
                 # --- HIPERPARÁMETROS ANTI-KEYERROR ---
-                "learning_rate": 3e-4, "lr_schedule": "adaptive", "schedule_type": "standard", "kl_threshold": 0.008,
-                "horizon_length": 512, "minibatch_size": 2048, "mini_epochs": 4, "max_epochs": 5000,
-                "save_best_after": 10, "save_frequency": 50, "print_stats": True, "grad_norm": 1.0,
-                "entropy_coef": 0.0, "truncate_grads": True, "e_clip": 0.2, "clip_value": True,
-                "critic_coef": 2.0, "bounds_loss_coef": 0.0001, "gamma": 0.99, "tau": 0.95,
-                "score_to_win": 100000, "use_smooth_clamp": False, "weight_decay": 0.0,
-                "player": {"deterministic": True, "games_num": 1000000}
+                "learning_rate": 3e-4,
+                "lr_schedule": "adaptive",
+                "schedule_type": "standard",
+                "kl_threshold": 0.008,
+                "horizon_length": 512,
+                "minibatch_size": 2048,     # <-- 16 robots * 512 horizon / 4 bloques
+                "mini_epochs": 4,
+                "max_epochs": 5000,
+                "save_best_after": 10,
+                "save_frequency": 50,
+                "print_stats": True,
+                "grad_norm": 1.0,
+                "entropy_coef": 0.0,
+                "truncate_grads": True,
+                "e_clip": 0.2,
+                "clip_value": True,
+                "critic_coef": 2.0,
+                "bounds_loss_coef": 0.0001,
+                "gamma": 0.99,
+                "tau": 0.95,
+                "score_to_win": 100000,
+                "use_smooth_clamp": False,
+                "weight_decay": 0.0,
+                
+                "player": {
+                    "deterministic": True,
+                    "games_num": 1000000 
+                }
             }
         }
     }
@@ -1812,7 +1880,12 @@ def main():
     print("[INFO] Inyectando red neuronal y arrancando bucle de ENTRENAMIENTO...")
     runner = Runner()
     runner.load(ppo_config)
-    runner.run({'train': True, 'play': False})
+    
+    runner.run({
+        'train': True,  
+        'play': False
+    })
+
     base_env.close()
 
 if __name__ == "__main__":
@@ -1877,9 +1950,6 @@ simulation_app = app_launcher.app
 import torch
 import pandas as pd
 import sys
-import tkinter as tk
-from tkinter import filedialog
-import os
 
 from isaaclab.envs import ManagerBasedRLEnv
 from xarm5_env_cfg import XArm5EnvCfg
@@ -1892,58 +1962,137 @@ def main():
     print("[INFO] Cargando entorno físico en modo Evaluación (3D)...")
     env_cfg = XArm5EnvCfg()
     base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    
     env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
+
     vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
-    env_configurations.register('rlgpu', {'vecenv_type': 'RLGAMES', 'env_creator': lambda **kwargs: env})
+
+    env_configurations.register('rlgpu', {
+        'vecenv_type': 'RLGAMES',
+        'env_creator': lambda **kwargs: env
+    })
 
     # === SELECCIÓN POR EXPLORADOR DE ARCHIVOS ===
+    import tkinter as tk
+    from tkinter import filedialog
+
     print("\n" + "="*70)
     print(" EVALUACIÓN 3D - CONTROL DE IMPEDANCIA")
     print("="*70)
-    
+    print("[INFO] Abriendo ventana del explorador de archivos...")
+
+    # Crear ventana raíz de tkinter y ocultarla
     root = tk.Tk()
     root.withdraw() 
+    
+    # Abrir el cuadro de diálogo
     csv_path = filedialog.askopenfilename(
         title="Selecciona el archivo CSV experto",
         filetypes=[("Archivos CSV", "*.csv"), ("Todos los archivos", "*.*")]
     )
+    
+    # Destruir tkinter para que no haga conflicto con el motor gráfico de Isaac Lab
     root.destroy() 
 
     if not csv_path:
-        print("[ERROR CRÍTICO] Cancelado por el usuario.")
-        base_env.close(); sys.exit()
+        print("[ERROR CRÍTICO] No seleccionaste ningún archivo. Cancelando evaluación...")
+        base_env.close()
+        sys.exit()
 
+    print(f"\n[INFO] Leyendo trayectoria experta desde: {csv_path}")
     try:
         df = pd.read_csv(csv_path)
         registry.load_csv_data(df)
-        print(f"[EXITO] CSV Cargado.")
+        print(f"[EXITO] Interpolación temporal activa sobre {len(df)} muestras.")
     except Exception as e:
-        print(f"[ERROR CRÍTICO] {e}")
-        base_env.close(); sys.exit()
-
+        print(f"[ERROR CRÍTICO] No se pudo cargar el CSV: {e}")
+        base_env.close()
+        sys.exit()
+    # ============================================
+    
     ppo_config = {
         "params": {
-            "seed": 42, "algo": {"name": "a2c_continuous"}, "model": {"name": "continuous_a2c_logstd"},
+            "seed": 42,
+            "algo": {"name": "a2c_continuous"},
+            "model": {"name": "continuous_a2c_logstd"},
             "network": {
-                "name": "actor_critic", "separate": False,
-                "space": {"continuous": {"mu_activation": "None", "sigma_activation": "None", "fixed_sigma": True}},
-                "mlp": {"units": [256, 128, 64], "activation": "elu"} 
+                "name": "actor_critic",
+                "separate": False,
+                "space": {
+                    "continuous": {
+                        "mu_activation": "None", 
+                        "sigma_activation": "None",
+                        "mu_init": {"name": "default"},
+                        "sigma_init": {"name": "const_initializer", "val": 0.0},
+                        "fixed_sigma": True
+                    }
+                },
+                "mlp": {
+                    "units": [256, 128, 64], 
+                    "activation": "elu",
+                    "initializer": {"name": "default"},
+                    "regularizer": {"name": "None"}
+                } 
             },
             "load_checkpoint": True,
-            # RUTA DEL CHECKPOINT ENTRENADO
+            # RUTA EXACTA DEL CHECKPOINT TRIUNFAL
             "load_path": "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/runs/xarm5_phri_ppo_23-16-39-33/nn/xarm5_phri_ppo.pth", 
             "config": {
-                "name": "xarm5_phri_ppo", "env_name": "rlgpu", "device": "cuda:0", "ppo": True,
-                "num_actors": base_env.num_envs, "horizon_length": 512, "minibatch_size": 2048,
-                "player": {"deterministic": True, "games_num": 1000000}
+                "name": "xarm5_phri_ppo",
+                "env_name": "rlgpu",
+                "device": "cuda:0",
+                "ppo": True,
+                "mixed_precision": False,
+                "normalize_input": False,  
+                "normalize_value": False,
+                "normalize_advantage": True,
+                "value_bootstrap": True,
+                "num_actors": base_env.num_envs,
+                "reward_shaper": {"scale_value": 1.0},
+                
+                # --- HIPERPARÁMETROS (Mantenidos por compatibilidad estructural) ---
+                "learning_rate": 3e-4,
+                "lr_schedule": "adaptive",
+                "schedule_type": "standard",
+                "kl_threshold": 0.008,
+                "horizon_length": 512,
+                "minibatch_size": 2048,
+                "mini_epochs": 4,
+                "max_epochs": 5000,
+                "save_best_after": 10,
+                "save_frequency": 50,
+                "print_stats": True,
+                "grad_norm": 1.0,
+                "entropy_coef": 0.0,
+                "truncate_grads": True,
+                "e_clip": 0.2,
+                "clip_value": True,
+                "critic_coef": 2.0,
+                "bounds_loss_coef": 0.0001,
+                "gamma": 0.99,
+                "tau": 0.95,
+                "score_to_win": 100000,
+                "use_smooth_clamp": False,
+                "weight_decay": 0.0,
+                
+                "player": {
+                    "deterministic": True,
+                    "games_num": 1000000 
+                }
             }
         }
     }
 
-    print("[INFO] Arrancando bucle de EVALUACIÓN...")
+    print("[INFO] Inyectando red neuronal y arrancando bucle de EVALUACIÓN...")
     runner = Runner()
     runner.load(ppo_config)
-    runner.run({'train': False, 'play': True})
+    
+    # LA LLAVE PARA LA EVALUACIÓN 3D
+    runner.run({
+        'train': False,  
+        'play': True
+    })
+
     base_env.close()
 
 if __name__ == "__main__":
