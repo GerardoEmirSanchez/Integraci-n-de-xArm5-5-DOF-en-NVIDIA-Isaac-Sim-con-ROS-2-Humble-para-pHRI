@@ -2130,6 +2130,290 @@ Se desarrollará una herramienta de evaluación visual (`play_ppo.py`) dotada de
 
 Esta reestructuración algorítmica garantizará que los tensores resultantes posean capacidades de generalización estructural, sentando la validación final del esquema de Control de Impedancia Variable mediante Aprendizaje por Refuerzo para transferencia *Sim-to-Real*.
 
+---
+
+## 🚀 Fase 19: Generalización de la Ley de Impedancia mediante Aumento de Datos Masivo (Data Augmentation)
+
+**Objetivo Principal:**
+Tras el cierre del bucle en la Fase 18, se detectó empíricamente que someter el modelo a una trayectoria estática única destruye la relación de causalidad entre la fuerza externa ($F_{ext}$) y el desplazamiento compliante. El agente memorizó la coreografía temporal en lugar de aprender la ley física. Esta fase documenta la reestructuración del conducto de datos (*pipeline*) para ingerir masivamente directorios completos de experimentos físicos, erradicando el sesgo temporal y forzando una política puramente reactiva.
+
+---
+
+### 19.1 Ingesta Masiva y Concatenación Cronológica (train_ppo.py)
+
+**¿Por qué se hizo esto?**
+Para evitar el sobreajuste (*overfitting*), el sistema de entrenamiento fue modificado para ingerir dinámicamente múltiples archivos CSV utilizando las librerías `glob` y `tkinter`. Para prevenir el colapso de las funciones de interpolación en el simulador, los archivos son encadenados cronológicamente mediante un desplazamiento iterativo de la base temporal:
+$$t_{absoluto} = t_{archivo\_actual} + t_{acumulado\_previo}$$
+Esto construye una super-trayectoria continua de múltiples minutos, exponiendo a la red a una variabilidad extrema de perturbaciones.
+
+**Protocolo de Acceso y Ejecución (Cold Start):**
+Para iniciar el entrenamiento masivo desde una PC recién encendida, abre una terminal (`Ctrl + Alt + T`) y ejecuta:
+
+```bash
+# 1. Cargar variables de ROS 2
+source /opt/ros/humble/setup.bash
+
+# 2. Activar el entorno virtual de Isaac Sim
+source ~/isaac_env/bin/activate
+
+# 3. Navegar a la carpeta de PPO y abrir VS Code para inspección
+cd ~/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab
+code .
+
+# 4. Lanzar el entrenamiento (Headless para optimizar VRAM en la RTX 4050)
+python3 train_ppo.py --headless
+```
+
+Código actualizado para `train_ppo.py`:
+
+```python
+import argparse
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Entrenamiento PPO Headless - pHRI Masivo")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import torch
+import pandas as pd
+import sys
+import os
+import glob
+import tkinter as tk
+from tkinter import filedialog
+
+from isaaclab.envs import ManagerBasedRLEnv
+from xarm5_env_cfg import XArm5EnvCfg
+from force_registry import registry
+from rl_games.common import env_configurations, vecenv
+from rl_games.torch_runner import Runner
+from isaaclab_rl.rl_games import RlGamesVecEnvWrapper
+
+def main():
+    print("[INFO] Cargando entorno físico en modo Entrenamiento Headless...")
+    env_cfg = XArm5EnvCfg()
+    base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    
+    env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
+    vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
+    env_configurations.register('rlgpu', {'vecenv_type': 'RLGAMES', 'env_creator': lambda **kwargs: env})
+
+    # === CARGA MASIVA DE DATOS EXPERTOS (CARPETA) ===
+    print("\n" + "="*70)
+    print(" ENTRENAMIENTO PPO - SELECCIÓN DE CARPETA")
+    print("="*70)
+    
+    root = tk.Tk()
+    root.withdraw()
+    carpeta_datos = filedialog.askdirectory(title="Selecciona la carpeta de mediciones CSV para PPO")
+    root.destroy()
+
+    if not carpeta_datos:
+        print("[ERROR CRÍTICO] Cancelando...")
+        base_env.close(); sys.exit()
+
+    archivos_csv = sorted(glob.glob(os.path.join(carpeta_datos, "*.csv")))
+    if not archivos_csv:
+        print(f"[ERROR CRÍTICO] No hay CSVs en: {carpeta_datos}")
+        base_env.close(); sys.exit()
+
+    print(f"\n[INFO] Procesando {len(archivos_csv)} archivos CSV...")
+    
+    try:
+        lista_dfs = []
+        tiempo_acumulado = 0.0
+
+        for archivo in archivos_csv:
+            df = pd.read_csv(archivo)
+            # Desplazamiento temporal para encadenar archivos
+            if 'Time_s' in df.columns:
+                df['Time_s'] = df['Time_s'] + tiempo_acumulado
+                tiempo_acumulado = df['Time_s'].max() + 0.01 
+            lista_dfs.append(df)
+
+        df_total = pd.concat(lista_dfs, ignore_index=True)
+        registry.load_csv_data(df_total)
+        
+        print(f"[EXITO] Interpolación activa sobre {len(df_total)} muestras.")
+        if 'Time_s' in df_total.columns:
+            print(f"[INFO] Tiempo total de experiencia: {df_total['Time_s'].max():.2f} segundos.")
+            
+    except Exception as e:
+        print(f"[ERROR CRÍTICO] Falló el procesamiento: {e}")
+        base_env.close(); sys.exit()
+    # ===============================================
+
+    ppo_config = {
+        "params": {
+            "seed": 42,
+            "algo": {"name": "a2c_continuous"},
+            "model": {"name": "continuous_a2c_logstd"},
+            "network": {
+                "name": "actor_critic", "separate": False,
+                "space": {"continuous": {"mu_activation": "None", "sigma_activation": "None", "fixed_sigma": True}},
+                "mlp": {"units": [256, 128, 64], "activation": "elu"} 
+            },
+            "load_checkpoint": True,
+            "load_path": "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/xarm5_policy_6D_v3.3.pth", 
+            "config": {
+                "name": "xarm5_phri_ppo", "env_name": "rlgpu", "device": "cuda:0", "ppo": True,
+                "num_actors": base_env.num_envs, "horizon_length": 512, "minibatch_size": 2048,
+                "player": {"deterministic": True, "games_num": 1000000}
+            }
+        }
+    }
+
+    print("[INFO] Arrancando bucle de ENTRENAMIENTO...")
+    runner = Runner()
+    runner.load(ppo_config)
+    runner.run({'train': True, 'play': False})
+    base_env.close()
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
+```
+
+### 19.2 Estabilización del Bucle Temporal Infinito (`force_registry.py`)
+
+**¿Por qué se hizo esto?**
+Una limitante crítica descubierta durante la ingesta masiva fue que el tiempo total de la "super-trayectoria" encadenada (~11 minutos) era radicalmente inferior a la duración del proceso de entrenamiento por Refuerzo (~2-3 horas físicas). Si el registro alcanzaba el final del vector, inyectaba ceros perpetuamente, corrompiendo el entrenamiento. Se implementó una lógica de reinicio circular para garantizar un flujo ininterrumpido de datos experenciales.
+
+Código actualizado para `force_registry.py`:
+
+```python
+import torch
+import numpy as np
+import time
+
+class ForceRegistry:
+    def __init__(self):
+        self.forces = None
+        self.torques = None
+        self.dts = None
+        self.target_qs = None 
+        self.time_series = None
+        
+        self.isaac_dt = 0.02     
+        self.current_sim_time = 0.0
+        self.is_active = False
+        self.start_real_time = 0.0
+
+    def load_csv_data(self, df):
+        f_np = df[['Fx', 'Fy', 'Fz']].values.astype(np.float32)
+        t_np = df[['Tx_EE', 'Ty_EE', 'Tz_EE']].values.astype(np.float32)
+        q_np = df[['q1', 'q2', 'q3', 'q4', 'q5']].values.astype(np.float32) 
+        
+        # El tiempo físico real dictado por tu sensor
+        if 'Time_s' in df.columns:
+            self.time_series = df['Time_s'].values.astype(np.float32)
+        else:
+            self.time_series = np.arange(len(df)) * 0.01
+
+        # El delta t interno exclusivo para la red neuronal (15D)
+        if 'Loop_Duration_s' in df.columns:
+            dts_np = df['Loop_Duration_s'].values.astype(np.float32)
+        else:
+            dts_np = np.full((len(df),), 0.01, dtype=np.float32)
+
+        self.forces = torch.tensor(f_np)
+        self.torques = torch.tensor(t_np)
+        self.dts = torch.tensor(dts_np)
+        self.target_qs = torch.tensor(q_np) 
+        
+        self.current_sim_time = 0.0
+        self.start_real_time = time.time()
+        self.is_active = True
+
+    def _interpolate_value(self, data_tensor, device, is_1d=False, dim=3):
+        # Si terminamos el CSV, devolvemos ceros
+        if self.current_sim_time >= self.time_series[-1]:
+            if is_1d: return torch.full((1, 1), 0.02, device=device)
+            return torch.zeros((1, dim), device=device)
+            
+        # Interpolación lineal en tiempo asíncrono
+        if is_1d:
+            val = np.interp(self.current_sim_time, self.time_series, data_tensor.numpy())
+            return torch.tensor([[val]], device=device, dtype=torch.float32)
+        else:
+            vals = [np.interp(self.current_sim_time, self.time_series, data_tensor[:, i].numpy()) for i in range(dim)]
+            return torch.tensor([vals], device=device, dtype=torch.float32)
+
+    def get_current_forces(self, num_envs, device):
+        if self.is_active and self.forces is not None:
+            return self._interpolate_value(self.forces, device, dim=3).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 3), device=device)
+
+    def get_current_torques(self, num_envs, device):
+        if self.is_active and self.torques is not None:
+            return self._interpolate_value(self.torques, device, dim=3).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 3), device=device)
+        
+    def get_current_dt(self, num_envs, device):
+        if self.is_active and self.dts is not None:
+            return self._interpolate_value(self.dts, device, is_1d=True).repeat(num_envs, 1)
+        return torch.full((num_envs, 1), 0.02, device=device)
+        
+    def get_target_qs(self, num_envs, device):
+        if self.is_active and self.target_qs is not None:
+            return self._interpolate_value(self.target_qs, device, dim=5).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 5), device=device)
+
+    def advance_step(self):
+        if self.is_active:
+            self.current_sim_time += self.isaac_dt
+            if int(self.current_sim_time / self.isaac_dt) % 250 == 0:
+                real_time = time.time() - self.start_real_time
+                rtf = self.current_sim_time / real_time if real_time > 0 else 0
+                print(f"[RELOJ] T_Simulado: {self.current_sim_time:.2f}s / {self.time_series[-1]:.2f}s | T_Real: {real_time:.2f}s | RTF: {rtf:.2f}x")
+                  
+            # EL FIX: Bucle temporal infinito
+            if self.current_sim_time >= self.time_series[-1]:
+                print(f"\n[INFO] Fin del mega-CSV alcanzado ({self.current_sim_time:.2f}s). ¡Reiniciando el bucle temporal!")
+                self.current_sim_time = 0.0 # Regresa al inicio del experimento
+
+registry = ForceRegistry()
+```
+
+### 19.3 Resultados Empíricos: Destrucción del Overfitting y Estrés Térmico
+
+La validación del conducto de datos se ejecutó exitosamente hasta alcanzar el límite paramétrico de $5,000$ épocas, procesando $\approx 41,000,000$ de fotogramas físicos.
+
+**Hallazgo de Hardware (Sim-to-Real Limit):**
+Durante la ejecución continua de madrugada, la telemetría del motor evidenció una caída drástica del Factor de Tiempo Real (RTF), colapsando de $\approx 2.05\times$ a un estado estacionario de $0.01\times$. Este fenómeno corrobora la existencia de thermal throttling (estrangulamiento térmico) en el hardware base al someter la arquitectura de la laptop a cargas sostenidas de cálculo tensorial.
+
+
+<img width="1850" height="1173" alt="Captura desde 2026-07-24 12-05-27" src="https://github.com/user-attachments/assets/dc3e04a2-12bf-4627-bfa7-d1d1835d8fb7" />
+
+**(Imagen 1: Registro de consola demostrando la culminación del bucle en 5,000 épocas y el impacto del estrés térmico en el rendimiento de simulación.)**
+
+**Hallazgo Algorítmico (El Colapso del Crítico):**
+La inyección masiva de datos cumplió su objetivo primordial: erradicar el atajo temporal. Sin embargo, las métricas extraídas vía TensorBoard revelan un fracaso en la convergencia espacial del agente.
+
+
+<img width="1920" height="1200" alt="Captura desde 2026-07-24 12-04-56" src="https://github.com/user-attachments/assets/278ac317-27c7-4aab-bd3d-b4c45e853882" />
+
+**(Imagen 2: Telemetría de TensorBoard demostrando la desestabilización asintótica en la recompensa y el error del crítico.)**
+
+
+
+
+1. **Divergencia de Recompensa (rewards/step):** La evaluación osciló violentamente en rangos de $-30$ a $-50$ millones. La red neuronal fue incapaz de memorizar el patrón temporal ante la variabilidad impuesta.
+2. **Explosión de Gradientes (losses/c_loss):** La función de valor del Crítico escaló hacia magnitudes de $1\times 10^{12}$. La función de recompensa original (Error Cuadrático Medio $\times -50.0$) resultó excesivamente estricta para un entorno generalizado. Cualquier desviación microscópica frente a 11 minutos de variabilidad generaba castigos astronómicos que destruyeron la estabilidad matemática del modelo, impidiendo la deducción de la ley de complianza pura.
+
+**Conclusión Preliminar y Próximos Pasos:**
+El conducto de datos (Data Augmentation) es estable y robusto, pero el diseño de la Recompensa (Reward Shaping) requiere una reestructuración inmediata para relajar la penalización posicional estricta y promover la complianza pasiva frente a estímulos externos.
+
+
+
+
+
+
+
+
+
 
 
 
