@@ -2433,7 +2433,7 @@ Por lo tanto, la red neuronal PPO `xarm5_phri_ppo.pth` que acababa de entrenar e
 
 Tomé la decisión de abortar la evaluación gráfica y descartar por completo este modelo entrenado en 6D. Aunque el algoritmo PPO logró estabilizar el robot de manera virtual, esta política es inútil para la tesis.
 
-**La razón es innegociable:** La API y la dinámica física del UFACTORY xArm5 en el mundo real exigen recibir el vector de comandos completo de 8 dimensiones para garantizar la estabilidad y seguridad en tareas de control de admitancia (pHRI). Si la red neuronal no emite explícitamente los perfiles pre-filtrados de velocidad y aceleración, el puente Sim-to-Real colapsa; el hardware físico no sabría con qué inercia ejecutar los comandos espaciales generados por la IA.
+**La razón:** La API y la dinámica física del UFACTORY xArm5 en el mundo real exigen recibir el vector de comandos completo de 8 dimensiones para garantizar la estabilidad y seguridad en tareas de control de admitancia (pHRI). Si la red neuronal no emite explícitamente los perfiles pre-filtrados de velocidad y aceleración, el puente Sim-to-Real colapsa; el hardware físico no sabría con qué inercia ejecutar los comandos espaciales generados por la IA.
 
 ### 20.3 Plan de Acción Inmediato: Rediseño a 8D en Isaac Lab
 
