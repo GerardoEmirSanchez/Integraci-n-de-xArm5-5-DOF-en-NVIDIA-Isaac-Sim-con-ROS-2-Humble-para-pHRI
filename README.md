@@ -2409,14 +2409,40 @@ La inyección masiva de datos cumplió su objetivo primordial: erradicar el ataj
 El conducto de datos (Data Augmentation) es estable y robusto, pero el diseño de la Recompensa (Reward Shaping) requiere una reestructuración inmediata para relajar la penalización posicional estricta y promover la complianza pasiva frente a estímulos externos.
 
 
+## 🚨 Fase 20: Convergencia con Tanh, Evaluación Sim-to-Sim y el Límite Dimensional (6D vs 8D)
 
+Para resolver la inestabilidad matemática y la explosión de gradientes detectadas al final de la Fase 19, reestructuré la función de recompensa. Reemplacé la penalización de Error Cuadrático Medio estricta por un núcleo cóncavo trigonométrico (Kernel Tanh) y penalicé exclusivamente la variación de la acción (*jerk*) en lugar del torque absoluto. 
 
+Esto permitió que el entrenamiento masivo de 5,000 épocas convergiera de manera excepcionalmente estable. La función de valor del Crítico minimizó su error a niveles de $10^{-3}$ y la recompensa se estabilizó en una asíntota asintótica de 2.36.
 
+Con un modelo aparentemente exitoso, procedí a desarrollar el script de validación `graficar_ppo_tesis.py` para cruzar la inferencia pura de la política PPO contra la telemetría del experto (recreando la matriz 3x3 de la Fase 17) con el objetivo de cuantificar la eliminación del *Covariate Shift*.
 
+### 20.1 El Diagnóstico del Fallo: La Poda Dimensional Silenciosa
+Durante la preparación de los tensores de PyTorch para la inferencia gráfica, descubrí un error de diseño arquitectónico crítico provocado por las capas de abstracción de Isaac Lab. 
 
+Al configurar el actuador en mi archivo `xarm5_env_cfg.py`, utilicé el controlador cinemático inverso diferencial nativo:
+```python
+controller=DifferentialIKControllerCfg(command_type="pose", ...)
+```
 
+**El problema:** El Action Manager de Isaac Lab está rígidamente programado en su código fuente para truncar el espacio de acción de este controlador a estrictamente 6 dimensiones ($\Delta X, \Delta Y, \Delta Z, \Delta Roll, \Delta Pitch, \Delta Yaw$). El simulador ignoró la topología original de 8 salidas que definí rigurosamente en la Fase 17 y delegó el cálculo de las dinámicas ($Vel_{filt}, Acc_{filt}$) al motor físico interno (PhysX).
 
+Por lo tanto, la red neuronal PPO `xarm5_phri_ppo.pth` que acababa de entrenar era estructuralmente un modelo de 6D. La política nunca aprendió a predecir la inercia ni la aceleración, asumiendo que el simulador lo resolvería de fondo.
 
+### 20.2 Inviabilidad del Sim-to-Real y Descarte del Modelo
+
+Tomé la decisión de abortar la evaluación gráfica y descartar por completo este modelo entrenado en 6D. Aunque el algoritmo PPO logró estabilizar el robot de manera virtual, esta política es inútil para la tesis.
+
+**La razón es innegociable:** La API y la dinámica física del UFACTORY xArm5 en el mundo real exigen recibir el vector de comandos completo de 8 dimensiones para garantizar la estabilidad y seguridad en tareas de control de admitancia (pHRI). Si la red neuronal no emite explícitamente los perfiles pre-filtrados de velocidad y aceleración, el puente Sim-to-Real colapsa; el hardware físico no sabría con qué inercia ejecutar los comandos espaciales generados por la IA.
+
+### 20.3 Plan de Acción Inmediato: Rediseño a 8D en Isaac Lab
+
+No puedo adaptar el hardware real a las limitaciones de las clases predeterminadas del simulador. Para que Isaac Lab respete la topología de mi investigación, ejecutaré los siguientes pasos en la próxima fase:
+
+1. **Desarrollo de un `ActionTerm` Personalizado:** Escribiré una clase nativa en Python que sobreescriba el Action Manager de Isaac Lab, forzando a la librería `rl_games` a instanciar un Actor con una capa de salida de exactamente 8 neuronas.
+2. **Bifurcación del Tensor en Tiempo Real:** Durante el entrenamiento, las primeras 6 dimensiones del tensor se inyectarán al `DifferentialIKController` para renderizar el modelo 3D, mientras que las 2 dimensiones restantes ($Vel_{filt}, Acc_{filt}$) operarán como variables latentes independientes.
+3. **Inclusión Dinámica en la Función de Recompensa:** Modificaré el esquema de premios para que evalúe y penalice la divergencia matemática de estas 2 variables latentes explícitamente contra la telemetría del experto (BC).
+4. **Re-entrenamiento Definitivo:** Una vez blindada la arquitectura de 8D, reiniciaré el entrenamiento masivo para obtener la política final que cruzará a la validación en el robot físico.
 
 
 
