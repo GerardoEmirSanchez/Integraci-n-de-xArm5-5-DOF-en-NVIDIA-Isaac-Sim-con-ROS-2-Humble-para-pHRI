@@ -2408,6 +2408,7 @@ La inyección masiva de datos cumplió su objetivo primordial: erradicar el ataj
 **Conclusión Preliminar y Próximos Pasos:**
 El conducto de datos (Data Augmentation) es estable y robusto, pero el diseño de la Recompensa (Reward Shaping) requiere una reestructuración inmediata para relajar la penalización posicional estricta y promover la complianza pasiva frente a estímulos externos.
 
+---
 
 ## 🚨 Fase 20: Convergencia con Tanh, Evaluación Sim-to-Sim y el Límite Dimensional (6D vs 8D)
 
@@ -2444,10 +2445,132 @@ No puedo adaptar el hardware real a las limitaciones de las clases predeterminad
 3. **Inclusión Dinámica en la Función de Recompensa:** Modificaré el esquema de premios para que evalúe y penalice la divergencia matemática de estas 2 variables latentes explícitamente contra la telemetría del experto (BC).
 4. **Re-entrenamiento Definitivo:** Una vez blindada la arquitectura de 8D, reiniciaré el entrenamiento masivo para obtener la política final que cruzará a la validación en el robot físico.
 
+---
+
+## 🚀 Fase 20: Arquitectura 8D Nativa, Validación Analítica y Solución al Control "Bang-Bang" (27-agost-2026)
+
+**Objetivo Principal:**
+Durante la transición hacia el entorno de simulación física en Isaac Lab, se identificó una inestabilidad estructural y conductual en la red neuronal que impedía el despliegue seguro en hardware. Esta fase documenta el diagnóstico y la resolución de la poda dimensional impuesta por el simulador (6D vs 8D), la superación de bloqueos de seguridad en PyTorch, el desarrollo de herramientas de validación analítica y la implementación de restricciones termodinámicas para erradicar la explotación de la física virtual (*Control Bang-Bang*).
+
+### 20.1 El Muro Dimensional de Isaac Lab y la Clase `XArm8DAction`
+
+**El Problema:**
+Al configurar el actuador del robot en el simulador, se utilizó el controlador cinemático estándar `DifferentialIKControllerCfg`. Se descubrió que las capas internas de Isaac Lab truncan estrictamente el espacio de acción de este controlador a 6 dimensiones (posición y orientación espaciales). Como consecuencia, el simulador amputaba silenciosamente las predicciones de velocidad y aceleración filtradas emitidas por la red, delegando la inercia al motor físico PhysX. La red neuronal operaba como un modelo 6D, lo cual resultaba inaceptable para el control de admitancia en el mundo real, donde el UFACTORY xArm5 exige el vector completo de 8 dimensiones.
+
+**La Solución:**
+Para forzar a la librería `rl_games` a instanciar un Actor de 8 salidas sin modificar el código fuente de Isaac Lab, se programó una clase envolvente personalizada. Esta clase intercepta el tensor neuronal, envía las 6 dimensiones espaciales al motor cinemático para renderizar el movimiento y almacena las 2 dimensiones dinámicas ($Vel_{filt}, Acc_{filt}$) como variables latentes accesibles para el cálculo de recompensas.  
+
+`xarm_action_term_8d.py`
+
+```python
+import torch
+from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab.utils import configclass
+
+class XArm8DAction(DifferentialInverseKinematicsAction):
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+
+    @property
+    def action_dim(self) -> int:
+        return 8
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions[:] = actions
+        self.acciones_dinamicas_2D = actions[:, 6:8] 
+        acciones_espaciales_6D = actions[:, 0:6]
+        
+        scale = getattr(self.cfg, 'scale', 1.0)
+        if isinstance(scale, (list, tuple)) or torch.is_tensor(scale):
+            scale = torch.tensor(scale, device=self.device)
+            
+        self.actions = acciones_espaciales_6D * scale
+
+    def apply_actions(self):
+        super().apply_actions()
+        self.vel_filt = self.acciones_dinamicas_2D[:, 0]
+        self.acc_filt = self.acciones_dinamicas_2D[:, 1]
+
+@configclass
+class XArm8DActionCfg(DifferentialInverseKinematicsActionCfg):
+    class_type: type = XArm8DAction
+```
+
+### 20.2 Bloqueo de PyTorch 2.6 y Lógica de Reanudación
+
+**El Problema:**
+Al intentar cargar los pesos entrenados (`.pth`) para validación o continuación del entrenamiento, PyTorch 2.6 bloqueaba la ejecución por razones de seguridad, ya que `rl_games` empaqueta escalares de `numpy` en sus archivos. Además, el entrenamiento masivo (5,000 épocas) exigía un mecanismo robusto para pausar y reanudar el proceso sin corromper el progreso ni desbordar la memoria VRAM del sistema.
+
+**La Solución:**
+Se implementó un parche de seguridad inyectando `torch.serialization.add_safe_globals` y forzando la bandera `weights_only=False` en las rutinas de carga. Para gestionar el entrenamiento, se desarrolló el script `resume_ppo.py`, el cual utiliza la librería `glob` para localizar dinámicamente el último punto de control válido. Adicionalmente, se calculó matemáticamente el tamaño de bloque (`minibatch_size` a 2048) para balancear la carga de los 16 entornos vectorizados y evitar excepciones (KeyErrors) en el framework.
+
+Extracto de `resume_ppo.py`
+
+```python
+# === PARCHE DE SEGURIDAD PYTORCH 2.6 ===
+_original_torch_load = torch.load
+def _patched_load(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = _patched_load
+# =======================================
+
+def obtener_ultimo_checkpoint():
+    runs_dir = "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/runs"
+    run_folders = sorted(glob.glob(os.path.join(runs_dir, "xarm5_phri_ppo_*")), reverse=True)
+    for folder in run_folders:
+        checkpoints = sorted(glob.glob(os.path.join(folder, "nn", "*.pth")), key=os.path.getmtime)
+        if checkpoints: return checkpoints[-1]
+    sys.exit()
+```
+
+### 20.3 Validación Analítica Offline y el Fenómeno "Bang-Bang"
+
+**El Problema:**
+Para certificar el aprendizaje, se desarrolló el módulo `validacion_offline_ppo.py`. Este script aísla las redes multicapa (MLP) del Actor, carga interactivamente los parámetros estadísticos Z-Score (`norm_params_X_v3.3.npy` y `norm_params_Y_v3.3.npy`) mediante `tkinter` e inyecta telemetría cruda para medir el error de regresión sin la interferencia del motor de físicas.
+
+**El Hallazgo:**
+Las gráficas revelaron una profunda divergencia conductual. En lugar de emitir comandos fluidos, el modelo generaba oscilaciones extremas de alta frecuencia. El algoritmo descubrió que la rigidez y amortiguamiento virtuales (`stiffness=400.0`, `damping=40.0`) actuaban como un filtro pasa-bajos. Para maximizar la recompensa espacial de seguimiento, la red enviaba comandos masivos asumiendo que la física virtual los amortiguaría. En un escenario de transferencia física, esta señal "Bang-Bang" habría destruido el tren de engranajes del cobot.
+
+<img width="1656" height="923" alt="Captura desde 2026-08-27 19-39-27" src="https://github.com/user-attachments/assets/a9c03293-4ff7-4b57-b0bd-27b1423398de" />
 
 
+<img width="1652" height="930" alt="Captura desde 2026-08-27 19-39-03" src="https://github.com/user-attachments/assets/86da0064-42f8-43af-b599-f49a476b2166" />
+
+### 20.4 Blindaje Termodinámico (Anti-Hack)
+
+**La Solución:**
+
+Para erradicar esta vulnerabilidad y forzar a la red a generar un control intrínsecamente seguro para el hardware, se aplicó una reestructuración de castigos en el archivo de configuración del entorno (`xarm5_env_cfg.py`) y un enfriamiento en el optimizador (`train_ppo.py`).
+1. Castigo de Variación (Jerk): Se elevó el multiplicador de penalización de la tasa de acción a `-5.0`, anulando la recompensa ante fluctuaciones bruscas.
+2. Castigo de Magnitud (Eficiencia): Se introdujo una penalización paramétrica (`weight=-1.0`) que castiga las acciones con valores absolutos altos, promoviendo trayectorias de bajo coste energético.
+3. Enfriamiento PPO: Se redujo la tasa de aprendizaje (`learning_ratev`) de `3e-4` a `1e-4` y el umbral de actualización de política (`kl_threshold`) a `0.005`, restringiendo saltos exploratorios caóticos en el espacio latente.
 
 
+`xarm5_env_cfg.py` (Módulo de Recompensas Restringidas)
+
+```python
+def action_rate_penalty(env):
+    return torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+
+def action_magnitude_penalty(env):
+    return torch.sum(torch.square(env.action_manager.action), dim=1)
+
+@configclass
+class RewardsCfg:
+    esta_vivo = RewardTermCfg(func=lambda env: torch.ones(env.num_envs, device=env.device), weight=0.1)
+    premio_tracking = RewardTermCfg(func=tracking_reward_tanh, weight=10.0)
+    
+    # CASTIGOS BLINDADOS (ANTI-HACK)
+    castigo_jerk = RewardTermCfg(func=action_rate_penalty, weight=-5.0) 
+    castigo_magnitud = RewardTermCfg(func=action_magnitude_penalty, weight=-1.0) 
+    castigo_dinamico = RewardTermCfg(func=dynamic_penalty, weight=-2.0)
+```
+
+**Resultado Final:**
+
+Al relanzar el entrenamiento bajo este marco termodinámico estricto, los registros de TensorBoard confirmaron una caída inicial drástica en la recompensa, demostrando que la IA se vio obligada a abandonar el atajo "Bang-Bang" e iniciar la optimización matemática de un perfil cinemático suave y compatible con el mundo real.
 
 
 
