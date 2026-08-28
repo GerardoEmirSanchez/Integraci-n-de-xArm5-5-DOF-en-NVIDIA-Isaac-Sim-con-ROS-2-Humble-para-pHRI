@@ -2469,18 +2469,40 @@ from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsA
 from isaaclab.utils import configclass
 
 class XArm8DAction(DifferentialInverseKinematicsAction):
+    """
+    Controlador de acción personalizado que intercepta un vector 8D.
+    Usa 6D para la cinemática inversa espacial y 2D para la dinámica física.
+    """
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
 
     @property
     def action_dim(self) -> int:
+        """
+        [FUNDAMENTO MATEMÁTICO] Forzamos la propiedad estricta para que 
+        Isaac Lab y rl_games lean 8 neuronas de salida.
+        """
         return 8
 
     def process_actions(self, actions: torch.Tensor):
+        """
+        Intercepta el tensor de la IA en tiempo real.
+        actions shape: (num_envs, 8)
+        """
+        # 1. Llenamos el búfer original de Isaac Lab (que ahora es de tamaño 8)
+        # con el tensor completo de la red neuronal para evitar el RuntimeError.
         self._raw_actions[:] = actions
+        
+        # 2. Extraemos y guardamos las dimensiones latentes (Velocidad y Aceleración)
         self.acciones_dinamicas_2D = actions[:, 6:8] 
+        
+        # 3. Extraemos las 6D espaciales
         acciones_espaciales_6D = actions[:, 0:6]
         
+        # 4. SOBREESCRIBIMOS EL TENSOR EJECUTOR:
+        # Reasignamos self.actions para que sea estrictamente de 6 dimensiones.
+        # Cuando el método apply_actions se ejecute, leerá este tensor de 6D y 
+        # el controlador cinemático no se quejará.
         scale = getattr(self.cfg, 'scale', 1.0)
         if isinstance(scale, (list, tuple)) or torch.is_tensor(scale):
             scale = torch.tensor(scale, device=self.device)
@@ -2488,15 +2510,162 @@ class XArm8DAction(DifferentialInverseKinematicsAction):
         self.actions = acciones_espaciales_6D * scale
 
     def apply_actions(self):
+        """
+        Aplica los comandos espaciales al motor de físicas y expone 
+        las variables dinámicas latentes.
+        """
+        # El método padre moverá el brazo usando nuestro self.actions (que ahora es 6D)
         super().apply_actions()
+
+        # Extraemos la velocidad y aceleración para que el Reward Manager las lea
         self.vel_filt = self.acciones_dinamicas_2D[:, 0]
         self.acc_filt = self.acciones_dinamicas_2D[:, 1]
+
 
 @configclass
 class XArm8DActionCfg(DifferentialInverseKinematicsActionCfg):
     class_type: type = XArm8DAction
 ```
 
+`force_registry.py`
+
+```python
+import torch
+import numpy as np
+import time
+import subprocess
+
+class ForceRegistry:
+    def __init__(self):
+        self.forces = None
+        self.torques = None
+        self.dts = None
+        self.target_qs = None 
+        self.target_vels = None
+        self.target_accs = None
+        self.time_series = None
+        
+        self.isaac_dt = 0.02     
+        self.current_sim_time = 0.0
+        self.is_active = False
+        self.start_real_time = 0.0
+        self.absolute_step = 0  # <--- Nuevo contador de steps absolutos
+
+    def load_csv_data(self, df):
+        f_np = df[['Fx', 'Fy', 'Fz']].values.astype(np.float32)
+        t_np = df[['Tx_EE', 'Ty_EE', 'Tz_EE']].values.astype(np.float32)
+        q_np = df[['q1', 'q2', 'q3', 'q4', 'q5']].values.astype(np.float32) 
+        v_np = df['Vel_Filt'].values.astype(np.float32)
+        a_np = df['Acc_Filt'].values.astype(np.float32)
+        
+        if 'Time_s' in df.columns:
+            self.time_series = df['Time_s'].values.astype(np.float32)
+        else:
+            self.time_series = np.arange(len(df)) * 0.01
+
+        if 'Loop_Duration_s' in df.columns:
+            dts_np = df['Loop_Duration_s'].values.astype(np.float32)
+        else:
+            dts_np = np.full((len(df),), 0.01, dtype=np.float32)
+
+        self.forces = torch.tensor(f_np)
+        self.torques = torch.tensor(t_np)
+        self.dts = torch.tensor(dts_np)
+        self.target_qs = torch.tensor(q_np) 
+        self.target_vels = torch.tensor(v_np)
+        self.target_accs = torch.tensor(a_np)
+        
+        self.current_sim_time = 0.0
+        self.start_real_time = time.time()
+        self.is_active = True
+        self.absolute_step = 0
+
+    def get_hardware_temps(self):
+        """Consulta los sensores térmicos de Ubuntu y NVIDIA"""
+        try:
+            gpu_out = subprocess.check_output(['nvidia-smi', '--query-gpu=temperature.gpu', '--format=csv,noheader'], encoding='utf-8')
+            gpu_temp = gpu_out.strip()
+        except:
+            gpu_temp = "N/A"
+            
+        try:
+            cpu_out = subprocess.check_output(['cat', '/sys/class/thermal/thermal_zone0/temp'], encoding='utf-8')
+            cpu_temp = str(int(cpu_out.strip()) // 1000)
+        except:
+            cpu_temp = "N/A"
+            
+        return cpu_temp, gpu_temp
+
+    def _interpolate_value(self, data_tensor, device, is_1d=False, dim=3):
+        if self.current_sim_time >= self.time_series[-1]:
+            if is_1d: return torch.full((1, 1), 0.02, device=device)
+            return torch.zeros((1, dim), device=device)
+            
+        if is_1d:
+            val = np.interp(self.current_sim_time, self.time_series, data_tensor.numpy())
+            return torch.tensor([[val]], device=device, dtype=torch.float32)
+        else:
+            vals = [np.interp(self.current_sim_time, self.time_series, data_tensor[:, i].numpy()) for i in range(dim)]
+            return torch.tensor([vals], device=device, dtype=torch.float32)
+
+    def get_current_forces(self, num_envs, device):
+        if self.is_active and self.forces is not None:
+            return self._interpolate_value(self.forces, device, dim=3).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 3), device=device)
+
+    def get_current_torques(self, num_envs, device):
+        if self.is_active and self.torques is not None:
+            return self._interpolate_value(self.torques, device, dim=3).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 3), device=device)
+        
+    def get_current_dt(self, num_envs, device):
+        if self.is_active and self.dts is not None:
+            return self._interpolate_value(self.dts, device, is_1d=True).repeat(num_envs, 1)
+        return torch.full((num_envs, 1), 0.02, device=device)
+        
+    def get_target_qs(self, num_envs, device):
+        if self.is_active and self.target_qs is not None:
+            return self._interpolate_value(self.target_qs, device, dim=5).repeat(num_envs, 1)
+        return torch.zeros((num_envs, 5), device=device)
+
+    def get_target_vels(self, num_envs, device):
+        if self.is_active and self.target_vels is not None:
+            return self._interpolate_value(self.target_vels, device, is_1d=True).squeeze(1).repeat(num_envs)
+        return torch.zeros(num_envs, device=device)
+
+    def get_target_accs(self, num_envs, device):
+        if self.is_active and self.target_accs is not None:
+            return self._interpolate_value(self.target_accs, device, is_1d=True).squeeze(1).repeat(num_envs)
+        return torch.zeros(num_envs, device=device)
+
+    def advance_step(self):
+        if self.is_active:
+            self.current_sim_time += self.isaac_dt
+            self.absolute_step += 1
+            
+            # 1 Iteración (Época) = 512 steps. 
+            # 50 Iters = 25600 steps.
+            steps_por_iter = 512
+            frecuencia_iters = 10 
+            
+            if self.absolute_step > 0 and self.absolute_step % (steps_por_iter * frecuencia_iters) == 0:
+                iter_actual = self.absolute_step // steps_por_iter
+                real_time = time.time() - self.start_real_time
+                
+                # Usamos absolute_step para calcular el RTF total sin que el bucle del CSV lo corrompa
+                tiempo_simulado_total = self.absolute_step * self.isaac_dt
+                rtf = tiempo_simulado_total / real_time if real_time > 0 else 0
+                
+                cpu_t, gpu_t = self.get_hardware_temps()
+                
+                print(f"🌡️ [MONITOR] Iter (Época): {iter_actual} | RTF: {rtf:.2f}x | Tiempo de Sesión: {real_time/60:.1f} min | CPU: {cpu_t}°C | GPU: {gpu_t}°C")
+                  
+            if self.current_sim_time >= self.time_series[-1]:
+                print(f"\n[INFO] Fin del mega-CSV alcanzado. ¡Reiniciando el bucle temporal!")
+                self.current_sim_time = 0.0
+
+registry = ForceRegistry()
+```
 ### 20.2 Bloqueo de PyTorch 2.6 y Lógica de Reanudación
 
 **El Problema:**
@@ -2505,10 +2674,23 @@ Al intentar cargar los pesos entrenados (`.pth`) para validación o continuació
 **La Solución:**
 Se implementó un parche de seguridad inyectando `torch.serialization.add_safe_globals` y forzando la bandera `weights_only=False` en las rutinas de carga. Para gestionar el entrenamiento, se desarrolló el script `resume_ppo.py`, el cual utiliza la librería `glob` para localizar dinámicamente el último punto de control válido. Adicionalmente, se calculó matemáticamente el tamaño de bloque (`minibatch_size` a 2048) para balancear la carga de los 16 entornos vectorizados y evitar excepciones (KeyErrors) en el framework.
 
-Extracto de `resume_ppo.py`
+`resume_ppo.py`
 
 ```python
+import argparse
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Reanudar Entrenamiento PPO Headless")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import torch
+
 # === PARCHE DE SEGURIDAD PYTORCH 2.6 ===
+# Interceptamos torch.load para forzar weights_only=False
+# Esto permite que rl_games cargue sus escalares de Numpy antiguos sin que PyTorch bloquee el .pth
 _original_torch_load = torch.load
 def _patched_load(*args, **kwargs):
     kwargs['weights_only'] = False
@@ -2516,13 +2698,346 @@ def _patched_load(*args, **kwargs):
 torch.load = _patched_load
 # =======================================
 
+import pandas as pd
+import sys
+import os
+import glob
+import tkinter as tk
+from tkinter import filedialog
+
+from isaaclab.envs import ManagerBasedRLEnv
+from xarm5_env_cfg import XArm5EnvCfg
+from force_registry import registry
+from rl_games.common import env_configurations, vecenv
+from rl_games.torch_runner import Runner
+from isaaclab_rl.rl_games import RlGamesVecEnvWrapper
+
 def obtener_ultimo_checkpoint():
+    """Busca de la carpeta más nueva a la más vieja hasta encontrar un .pth válido"""
     runs_dir = "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/rl_isaaclab/runs"
+    
+    # Ordenamos de la MÁS NUEVA a la MÁS VIEJA (reverse=True)
     run_folders = sorted(glob.glob(os.path.join(runs_dir, "xarm5_phri_ppo_*")), reverse=True)
+    
+    if not run_folders:
+        print("[ERROR] No se encontraron corridas previas en 'runs/'.")
+        sys.exit()
+        
     for folder in run_folders:
         checkpoints = sorted(glob.glob(os.path.join(folder, "nn", "*.pth")), key=os.path.getmtime)
-        if checkpoints: return checkpoints[-1]
+        if checkpoints:
+            ultimo_pth = checkpoints[-1]
+            print(f"\n[INFO] 🔄 RESUMIENDO ENTRENAMIENTO DESDE: {ultimo_pth}")
+            return ultimo_pth
+            
+    print("[ERROR] No se encontraron checkpoints (.pth) en NINGUNA de las corridas previas.")
     sys.exit()
+
+def main():
+    print("[INFO] Cargando entorno físico para REANUDAR entrenamiento...")
+    env_cfg = XArm5EnvCfg()
+    base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    
+    env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
+    vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
+    env_configurations.register('rlgpu', {'vecenv_type': 'RLGAMES', 'env_creator': lambda **kwargs: env})
+
+    # === CARGA MASIVA DE DATOS EXPERTOS ===
+    print("\n" + "="*70)
+    print(" REANUDAR PPO - SELECCIÓN DE CARPETA DE DATOS")
+    print("="*70)
+    
+    root = tk.Tk()
+    root.withdraw()
+    carpeta_datos = filedialog.askdirectory(title="Selecciona la carpeta de mediciones CSV para continuar")
+    root.destroy()
+
+    if not carpeta_datos:
+        print("[ERROR CRÍTICO] Cancelando...")
+        base_env.close(); sys.exit()
+
+    archivos_csv = sorted(glob.glob(os.path.join(carpeta_datos, "*.csv")))
+    if not archivos_csv:
+        print(f"[ERROR CRÍTICO] No hay CSVs en: {carpeta_datos}")
+        base_env.close(); sys.exit()
+
+    print(f"\n[INFO] Procesando {len(archivos_csv)} archivos CSV...")
+    try:
+        lista_dfs = []
+        tiempo_acumulado = 0.0
+        for archivo in archivos_csv:
+            df = pd.read_csv(archivo)
+            if 'Time_s' in df.columns:
+                df['Time_s'] = df['Time_s'] + tiempo_acumulado
+                tiempo_acumulado = df['Time_s'].max() + 0.01 
+            lista_dfs.append(df)
+
+        df_total = pd.concat(lista_dfs, ignore_index=True)
+        registry.load_csv_data(df_total)
+        print(f"[EXITO] Interpolación activa sobre {len(df_total)} muestras consolidadas.")
+            
+    except Exception as e:
+        print(f"[ERROR CRÍTICO] Falló el procesamiento: {e}")
+        base_env.close(); sys.exit()
+
+    checkpoint_dinamico = obtener_ultimo_checkpoint()
+    
+    # === DICCIONARIO BLINDADO (TOPOLOGÍA COMPLETA) ===
+    ppo_config = {
+        "params": {
+            "seed": 42,
+            "algo": {"name": "a2c_continuous"},
+            "model": {"name": "continuous_a2c_logstd"},
+            "network": {
+                "name": "actor_critic", 
+                "separate": False,
+                "space": {
+                    "continuous": {
+                        "mu_activation": "None", 
+                        "sigma_activation": "None", 
+                        "mu_init": {"name": "default"},
+                        "sigma_init": {"name": "const_initializer", "val": 0.0},
+                        "fixed_sigma": True
+                    }
+                },
+                "mlp": {
+                    "units": [256, 128, 64], 
+                    "activation": "elu",
+                    "d2rl": False,
+                    "initializer": {"name": "default"},
+                    "regularizer": {"name": "None"}
+                } 
+            },
+            "load_checkpoint": True,
+            "load_path": checkpoint_dinamico,
+            "config": {
+                "name": "xarm5_phri_ppo", 
+                "env_name": "rlgpu", 
+                "device": "cuda:0", 
+                "ppo": True,
+                "num_actors": base_env.num_envs, 
+                "horizon_length": 512, 
+                "minibatch_size": 2048,
+                "mini_epochs": 4,
+                "save_frequency": 50,
+                "print_stats": False,
+                "player": {"deterministic": True, "games_num": 1000000},
+                
+                "reward_shaper": {"scale_value": 1.0},
+                "normalize_advantage": True,
+                "gamma": 0.99,
+                "tau": 0.95,
+                "learning_rate": 3e-4,
+                "lr_schedule": "adaptive",
+                "schedule_type": "standard",
+                "kl_threshold": 0.008,
+                "score_to_win": 20000,
+                "max_epochs": 5000,
+                "save_best_after": 100,
+                "use_experimental_cv": True,
+                "e_clip": 0.2,             
+                "clip_value": True,
+                "grad_norm": 1.0,
+                "entropy_coef": 0.0,
+                "critic_coef": 2.0,
+                "bounds_loss_coef": 0.0001,
+                "weight_decay": 0.0,
+                "normalize_input": False,
+                "normalize_value": False,
+                "value_bootstrap": True,
+                "mixed_precision": True,
+            }
+        }
+    }
+
+    print("\n[INFO] Reanudando bucle de ENTRENAMIENTO...")
+    print("[INFO] Monitoreo gráfico por TensorBoard. Monitoreo térmico en esta terminal cada 50 épocas.")
+
+    runner = Runner()
+    runner.load(ppo_config)
+    
+    # FORZAMOS LA CARGA INYECTANDO EL CHECKPOINT DIRECTAMENTE EN LOS ARGUMENTOS
+    runner.run({
+        'train': True, 
+        'play': False,
+        'checkpoint': checkpoint_dinamico
+    })
+    base_env.close()
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
+```
+
+`train_ppo.py`
+
+```python
+import argparse
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="Entrenamiento PPO Headless - Política Suavizada")
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+import torch
+import pandas as pd
+import sys
+import os
+import glob
+import tkinter as tk
+from tkinter import filedialog
+
+from isaaclab.envs import ManagerBasedRLEnv
+from xarm5_env_cfg import XArm5EnvCfg
+from force_registry import registry
+from rl_games.common import env_configurations, vecenv
+from rl_games.torch_runner import Runner
+from isaaclab_rl.rl_games import RlGamesVecEnvWrapper
+
+def main():
+    print("[INFO] Cargando entorno físico en modo Entrenamiento Headless...")
+    env_cfg = XArm5EnvCfg()
+    base_env = ManagerBasedRLEnv(cfg=env_cfg)
+    
+    env = RlGamesVecEnvWrapper(base_env, "cuda:0", clip_obs=100.0, clip_actions=1.0)
+
+    vecenv.register('RLGAMES', lambda config_name, num_actors, **kwargs: env)
+
+    env_configurations.register('rlgpu', {
+        'vecenv_type': 'RLGAMES',
+        'env_creator': lambda **kwargs: env
+    })
+
+    print("\n" + "="*70)
+    print(" ENTRENAMIENTO PPO - SELECCIÓN DE CARPETA")
+    print("="*70)
+    
+    root = tk.Tk()
+    root.withdraw()
+    carpeta_datos = filedialog.askdirectory(title="Selecciona la carpeta de mediciones CSV para PPO")
+    root.destroy()
+
+    if not carpeta_datos:
+        print("[ERROR CRÍTICO] No seleccionaste ninguna carpeta. Cancelando...")
+        base_env.close()
+        sys.exit()
+
+    archivos_csv = sorted(glob.glob(os.path.join(carpeta_datos, "*.csv")))
+    if not archivos_csv:
+        print(f"[ERROR CRÍTICO] No se encontraron archivos CSV en: {carpeta_datos}")
+        base_env.close()
+        sys.exit()
+
+    print(f"\n[INFO] Procesando {len(archivos_csv)} archivos CSV...")
+    
+    try:
+        lista_dfs = []
+        tiempo_acumulado = 0.0
+
+        for archivo in archivos_csv:
+            df = pd.read_csv(archivo)
+            if 'Time_s' in df.columns:
+                df['Time_s'] = df['Time_s'] + tiempo_acumulado
+                tiempo_acumulado = df['Time_s'].max() + 0.01 
+            lista_dfs.append(df)
+
+        df_total = pd.concat(lista_dfs, ignore_index=True)
+        registry.load_csv_data(df_total)
+        
+        print(f"[EXITO] Interpolación activa sobre {len(df_total)} muestras consolidadas.")
+    except Exception as e:
+        print(f"[ERROR CRÍTICO] Falló el procesamiento masivo de CSVs: {e}")
+        base_env.close()
+        sys.exit()
+
+    ppo_config = {
+        "params": {
+            "seed": 42,
+            "algo": {"name": "a2c_continuous"},
+            "model": {"name": "continuous_a2c_logstd"},
+            "network": {
+                "name": "actor_critic",
+                "separate": False,
+                "space": {
+                    "continuous": {
+                        "mu_activation": "None", 
+                        "sigma_activation": "None",
+                        "mu_init": {"name": "default"},
+                        "sigma_init": {"name": "const_initializer", "val": 0.0},
+                        "fixed_sigma": True
+                    }
+                },
+                "mlp": {
+                    "units": [256, 128, 64], 
+                    "activation": "elu",
+                    "initializer": {"name": "default"},
+                    "regularizer": {"name": "None"}
+                } 
+            },
+            "load_checkpoint": True,
+            "load_path": "/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/xarm5_policy_6D_v3.3.pth", 
+            "config": {
+                "name": "xarm5_phri_ppo",
+                "env_name": "rlgpu",
+                "device": "cuda:0",
+                "ppo": True,
+                "mixed_precision": False,
+                "normalize_input": False,  
+                "normalize_value": False,
+                "normalize_advantage": True,
+                "value_bootstrap": True,
+                "num_actors": base_env.num_envs,
+                "reward_shaper": {"scale_value": 1.0},
+                
+                # --- HIPERPARÁMETROS ENFRIADOS ---
+                "learning_rate": 1e-4,      # <-- Reducido (Antes 3e-4) para evitar brincos
+                "lr_schedule": "adaptive",
+                "schedule_type": "standard",
+                "kl_threshold": 0.005,      # <-- Reducido (Antes 0.008) para mayor estabilidad de política
+                "horizon_length": 512,
+                "minibatch_size": 2048,
+                "mini_epochs": 4,
+                "max_epochs": 5000,
+                "save_best_after": 10,
+                "save_frequency": 50,
+                "print_stats": True,
+                "grad_norm": 1.0,
+                "entropy_coef": 0.0,
+                "truncate_grads": True,
+                "e_clip": 0.2,
+                "clip_value": True,
+                "critic_coef": 2.0,
+                "bounds_loss_coef": 0.0001,
+                "gamma": 0.99,
+                "tau": 0.95,
+                "score_to_win": 100000,
+                "use_smooth_clamp": False,
+                "weight_decay": 0.0,
+                
+                "player": {
+                    "deterministic": True,
+                    "games_num": 1000000 
+                }
+            }
+        }
+    }
+
+    print("[INFO] Inyectando red neuronal y arrancando bucle de ENTRENAMIENTO...")
+    runner = Runner()
+    runner.load(ppo_config)
+    
+    runner.run({
+        'train': True,  
+        'play': False
+    })
+
+    base_env.close()
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
 ```
 
 ### 20.3 Validación Analítica Offline y el Fenómeno "Bang-Bang"
@@ -2551,22 +3066,428 @@ Para erradicar esta vulnerabilidad y forzar a la red a generar un control intrí
 `xarm5_env_cfg.py` (Módulo de Recompensas Restringidas)
 
 ```python
+import torch
+import numpy as np
+import isaaclab.utils.math as math_utils
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import ObservationGroupCfg, ObservationTermCfg, RewardTermCfg, TerminationTermCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+
+from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.actuators import ImplicitActuatorCfg
+
+from force_registry import registry
+from xarm_action_term_8d import XArm8DActionCfg
+
+# =====================================================================
+# 1. CARGA DE PARÁMETROS Z-SCORE (WARM START ALIGNMENT)
+# =====================================================================
+try:
+    norm_params = np.load('/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/norm_params_X_v3.3.npy', allow_pickle=True).item()
+    MU_X = torch.tensor(norm_params['mu'], dtype=torch.float32)
+    SIGMA_X = torch.tensor(norm_params['sigma'], dtype=torch.float32)
+    print("[INFO] Parámetros Z-Score (X) cargados correctamente para Isaac Sim.")
+except Exception as e:
+    print(f"[ERROR CRÍTICO] No se encontró el archivo de normalización X: {e}")
+    MU_X = torch.zeros(15, dtype=torch.float32)
+    SIGMA_X = torch.ones(15, dtype=torch.float32)
+
+try:
+    norm_params_Y = np.load('/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/norm_params_Y_v3.3.npy', allow_pickle=True).item()
+    MU_Y = torch.tensor(norm_params_Y['mu'], dtype=torch.float32)
+    SIGMA_Y = torch.tensor(norm_params_Y['sigma'], dtype=torch.float32)
+    print("[INFO] Parámetros Z-Score de ACCIÓN (Y) cargados correctamente.")
+except Exception as e:
+    print(f"[ERROR CRÍTICO] No se encontró el archivo de normalización Y: {e}")
+    MU_Y = torch.zeros(8, dtype=torch.float32)
+    SIGMA_Y = torch.ones(8, dtype=torch.float32)
+
+@configclass
+class XArm5SceneCfg(InteractiveSceneCfg):
+    num_envs: int = 16 
+    env_spacing: float = 2.0
+    
+    ground = AssetBaseCfg(
+        prim_path="/World/ground",
+        spawn=sim_utils.GroundPlaneCfg()
+    )
+
+    robot: ArticulationCfg = ArticulationCfg(
+        prim_path="/World/envs/env_.*/xarm5",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/gerardo_emir/xarm_ws/src/xarm_ros2/xarm_description/urdf/xarm5.usd",
+            activate_contact_sensors=True,
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            joint_pos={
+                "joint1": 0.0, "joint2": 0.0, "joint3": 0.0,
+                "joint4": 0.0, "joint5": 0.0,
+            },
+        ),
+        actuators={
+            "arm": ImplicitActuatorCfg(
+                joint_names_expr=["joint1", "joint2", "joint3", "joint4", "joint5"],
+                stiffness=400.0,
+                damping=40.0,
+            ),
+        }
+    )
+
+@configclass
+class ActionsCfg:
+    arm_action: XArm8DActionCfg = XArm8DActionCfg(
+        asset_name="robot",
+        joint_names=["joint1", "joint2", "joint3", "joint4", "joint5"],
+        body_name="link5", 
+        controller=DifferentialIKControllerCfg(
+            command_type="pose", 
+            use_relative_mode=True,
+            ik_method="pinv"
+        ),
+        scale=1.0,
+    )
+
+# =====================================================================
+# 2. FUNCIONES DE OBSERVACIÓN 
+# =====================================================================
+def dt_obs(env):
+    registry.advance_step()
+    dt = registry.get_current_dt(env.num_envs, env.device)
+    mu = MU_X[0].to(env.device)
+    sigma = SIGMA_X[0].to(env.device)
+    return (dt - mu) / sigma
+
+def inyectar_fuerzas(env):
+    fuerzas = registry.get_current_forces(env.num_envs, env.device)
+    if not registry.is_active:
+        fuerzas += (torch.rand((env.num_envs, 3), device=env.device) * 0.02) - 0.01
+    mu = MU_X[1:4].to(env.device)
+    sigma = SIGMA_X[1:4].to(env.device)
+    return (fuerzas - mu) / sigma
+
+def inyectar_torques(env):
+    torques = registry.get_current_torques(env.num_envs, env.device)
+    if not registry.is_active:
+        torques += (torch.rand((env.num_envs, 3), device=env.device) * 0.002) - 0.001
+    mu = MU_X[4:7].to(env.device)
+    sigma = SIGMA_X[4:7].to(env.device)
+    return (torques - mu) / sigma
+
+def ee_rpy_obs(env):
+    robot = env.scene["robot"]
+    body_idx = robot.find_bodies("link5")[0][0]
+    quat_w = robot.data.body_state_w[:, body_idx, 3:7]
+    roll, pitch, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    rpy = torch.stack([roll, pitch, yaw], dim=-1)
+    mu = MU_X[7:10].to(env.device)
+    sigma = SIGMA_X[7:10].to(env.device)
+    return (rpy - mu) / sigma
+
+def joint_pos_obs(env):
+    q = env.scene["robot"].data.joint_pos
+    mu = MU_X[10:15].to(env.device)
+    sigma = SIGMA_X[10:15].to(env.device)
+    return (q - mu) / sigma
+
+@configclass
+class ObservationsCfg:
+    @configclass
+    class PolicyCfg(ObservationGroupCfg):
+        dt = ObservationTermCfg(func=dt_obs)
+        forces = ObservationTermCfg(func=inyectar_fuerzas)
+        torques = ObservationTermCfg(func=inyectar_torques)
+        rpy = ObservationTermCfg(func=ee_rpy_obs)
+        joint_pos = ObservationTermCfg(func=joint_pos_obs)
+        
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+    
+    policy: PolicyCfg = PolicyCfg()
+
+# =====================================================================
+# 3. FUNCIONES DE RECOMPENSA EXTREMAS (Anti-Hack)
+# =====================================================================
+def tracking_reward_tanh(env):
+    if not registry.is_active: return torch.zeros(env.num_envs, device=env.device)
+    q_actual = env.scene["robot"].data.joint_pos
+    q_experto = registry.get_target_qs(env.num_envs, env.device)
+    error_l2 = torch.norm(q_actual - q_experto, dim=1)
+    gamma = 10.0 
+    return 1.0 - torch.tanh(gamma * error_l2)
+
 def action_rate_penalty(env):
+    # Penaliza severamente brincos grandes de un frame a otro
     return torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
 
 def action_magnitude_penalty(env):
+    # NUEVO: Obliga a la IA a mover el robot lo mínimo indispensable (Pereza energética)
     return torch.sum(torch.square(env.action_manager.action), dim=1)
+
+def dynamic_penalty(env):
+    if not registry.is_active: return torch.zeros(env.num_envs, device=env.device)
+    action_term = env.action_manager.get_term("arm_action")
+    pred_vel = action_term.vel_filt
+    pred_acc = action_term.acc_filt
+    
+    exp_vel_raw = registry.get_target_vels(env.num_envs, env.device)
+    exp_acc_raw = registry.get_target_accs(env.num_envs, env.device)
+    
+    mu_vel = MU_Y[6].to(env.device)
+    sigma_vel = SIGMA_Y[6].to(env.device)
+    mu_acc = MU_Y[7].to(env.device)
+    sigma_acc = SIGMA_Y[7].to(env.device)
+    
+    exp_vel_norm = (exp_vel_raw - mu_vel) / sigma_vel
+    exp_acc_norm = (exp_acc_raw - mu_acc) / sigma_acc
+    
+    error_dinamico = torch.abs(pred_vel - exp_vel_norm) + torch.abs(pred_acc - exp_acc_norm)
+    gamma = 1.0 
+    return torch.tanh(gamma * error_dinamico)
 
 @configclass
 class RewardsCfg:
     esta_vivo = RewardTermCfg(func=lambda env: torch.ones(env.num_envs, device=env.device), weight=0.1)
     premio_tracking = RewardTermCfg(func=tracking_reward_tanh, weight=10.0)
     
-    # CASTIGOS BLINDADOS (ANTI-HACK)
-    castigo_jerk = RewardTermCfg(func=action_rate_penalty, weight=-5.0) 
-    castigo_magnitud = RewardTermCfg(func=action_magnitude_penalty, weight=-1.0) 
+    # CASTIGOS BLINDADOS
+    castigo_jerk = RewardTermCfg(func=action_rate_penalty, weight=-5.0) # Subido x100 (antes -0.05)
+    castigo_magnitud = RewardTermCfg(func=action_magnitude_penalty, weight=-1.0) # Nuevo castigo
     castigo_dinamico = RewardTermCfg(func=dynamic_penalty, weight=-2.0)
+
+# =====================================================================
+# 4. CONFIGURACIÓN FINAL DEL ENTORNO
+# =====================================================================
+@configclass
+class TerminationsCfg:
+    time_out = TerminationTermCfg(func=lambda env: env.episode_length_buf >= env.max_episode_length)
+
+@configclass
+class XArm5EnvCfg(ManagerBasedRLEnvCfg):
+    def __post_init__(self):
+        self.scene = XArm5SceneCfg()
+        self.observations = ObservationsCfg()
+        self.actions = ActionsCfg()
+        self.rewards = RewardsCfg()
+        self.terminations = TerminationsCfg() 
+        
+        self.decimation = 2 
+        self.episode_length_s = 25.0 
+        self.sim.dt = 0.01 
+        self.sim.render_interval = self.decimation
 ```
+```python
+validacion_offline_ppo.py
+```
+```python
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
+import torch
+import torch.nn as nn
+import tkinter as tk
+from tkinter import filedialog
+import sys
+import os
+
+# =====================================================================
+# 1. TOPOLOGÍA EXACTA DEL ACTOR PPO (Basado en rl_games config)
+# =====================================================================
+class PPOActorPolicy(nn.Module):
+    def __init__(self, input_dim=15, output_dim=8):
+        super(PPOActorPolicy, self).__init__()
+        self.actor_mlp = nn.Sequential(
+            nn.Linear(input_dim, 256), nn.ELU(),
+            nn.Linear(256, 128), nn.ELU(),
+            nn.Linear(128, 64), nn.ELU()
+        )
+        self.mu = nn.Linear(64, output_dim)
+
+    def forward(self, x):
+        x = self.actor_mlp(x)
+        return self.mu(x)
+
+# =====================================================================
+# 2. FUNCIÓN PRINCIPAL DE ANÁLISIS
+# =====================================================================
+def main():
+    print("[INFO] Generando Matriz de Validación Analítica PPO 3x3...")
+    
+    root = tk.Tk()
+    root.withdraw()
+    
+    print("1. Selecciona tu archivo de pesajes PPO (.pth)...")
+    pth_path = filedialog.askopenfilename(title="1. Selecciona el Checkpoint PPO (.pth)", filetypes=[("PyTorch Models", "*.pth")])
+    if not pth_path: sys.exit()
+
+    print("2. Selecciona tu archivo CSV experto...")
+    csv_path = filedialog.askopenfilename(title="2. Selecciona el CSV Experto", filetypes=[("CSV Files", "*.csv")])
+    if not csv_path: sys.exit()
+
+    print("3. Selecciona tu normalizador de Observaciones (norm_params_X...npy)...")
+    norm_x_path = filedialog.askopenfilename(title="3. Selecciona norm_params_X", filetypes=[("Numpy Files", "*.npy")])
+    if not norm_x_path: sys.exit()
+
+    print("4. Selecciona tu normalizador de Acciones (norm_params_Y...npy)...")
+    norm_y_path = filedialog.askopenfilename(title="4. Selecciona norm_params_Y", filetypes=[("Numpy Files", "*.npy")])
+    if not norm_y_path: sys.exit()
+
+    modelo = PPOActorPolicy()
+    
+    try:
+        # Extrae exclusivamente los pesos del Actor desde el archivo de rl_games
+        checkpoint = torch.load(pth_path, map_location='cpu', weights_only=False)
+        estado_rl_games = checkpoint['model']
+        estado_limpio = {}
+        for k, v in estado_rl_games.items():
+            if k.startswith('a2c_network.actor_mlp.') or k.startswith('a2c_network.mu.'):
+                nueva_llave = k.replace('a2c_network.', '')
+                estado_limpio[nueva_llave] = v
+                
+        modelo.load_state_dict(estado_limpio, strict=True)
+        modelo.eval()
+        print("[EXITO] Sinapsis del Actor PPO cargada correctamente.")
+        
+        norm_X = np.load(norm_x_path, allow_pickle=True).item()
+        norm_Y = np.load(norm_y_path, allow_pickle=True).item()
+        
+    except Exception as e:
+        print(f"[ERROR CRÍTICO] Fallo al cargar pesos o normalizadores: {e}")
+        sys.exit()
+
+    df = pd.read_csv(csv_path, header=0)
+    
+    df['deltaRoll'] = df['Roll'].diff().fillna(0.0)
+    df['deltaRoll'] = (df['deltaRoll'] + 180) % 360 - 180
+    df['deltaPitch'] = df['Pitch'].diff().fillna(0.0)
+    df['deltaPitch'] = (df['deltaPitch'] + 180) % 360 - 180
+    df['deltaYaw'] = df['Yaw'].diff().fillna(0.0)
+    df['deltaYaw'] = (df['deltaYaw'] + 180) % 360 - 180
+    df = df.iloc[1:].reset_index(drop=True)
+
+    columnas_observacion = [
+        'Loop_Duration_s', 'Fx', 'Fy', 'Fz', 'Tx_EE', 'Ty_EE', 'Tz_EE', 
+        'Roll', 'Pitch', 'Yaw', 'q1', 'q2', 'q3', 'q4', 'q5'
+    ]
+    columnas_accion = [
+        'deltaXcmd', 'deltaYcmd', 'deltaZcmd', 
+        'deltaRoll', 'deltaPitch', 'deltaYaw', 
+        'Vel_Filt', 'Acc_Filt'
+    ]
+
+    X_raw = df[columnas_observacion].to_numpy(dtype=np.float32)
+    Y_real_raw = df[columnas_accion].to_numpy(dtype=np.float32)
+    tiempo = df['Time_s'].to_numpy(dtype=np.float32) if 'Time_s' in df.columns else np.arange(len(df)) * 0.01
+
+    X_norm = (X_raw - norm_X['mu']) / norm_X['sigma']
+    Y_real_norm = (Y_real_raw - norm_Y['mu']) / norm_Y['sigma']
+    
+    with torch.no_grad():
+        Y_pred_norm = modelo(torch.FloatTensor(X_norm)).numpy()
+
+    # --- DESNORMALIZACIÓN HÍBRIDA PPO (Corrección de unidades) ---
+    Y_pred_raw = np.zeros_like(Y_pred_norm)
+    Y_pred_raw[:, 0:3] = Y_pred_norm[:, 0:3] * 1000.0  # Metros a milímetros
+    Y_pred_raw[:, 3:6] = np.degrees(Y_pred_norm[:, 3:6]) # Radianes a grados
+    Y_pred_raw[:, 6:8] = (Y_pred_norm[:, 6:8] * norm_Y['sigma'][6:8]) + norm_Y['mu'][6:8] # Desnormalización dinámica
+
+    # =====================================================================
+    # 3. CREACIÓN DE LA MATRIZ 3x3 DE GRÁFICAS
+    # =====================================================================
+    plt.rcParams.update({'font.size': 12, 'axes.labelweight': 'normal'})
+    fig, axs = plt.subplots(3, 3, figsize=(18, 13))
+    fig.suptitle('PPO Analytical Validation (Offline Inference vs Expert CSV)', fontsize=22, fontweight='bold', y=0.98)
+    
+    metadata_graficas = [
+        {'etiqueta_y': r'$\Delta X$ [mm]'},
+        {'etiqueta_y': r'$\Delta Y$ [mm]'},
+        {'etiqueta_y': r'$\Delta Z$ [mm]'},
+        {'etiqueta_y': r'$\Delta Roll$ [°]'},
+        {'etiqueta_y': r'$\Delta Pitch$ [°]'},
+        {'etiqueta_y': r'$\Delta Yaw$ [°]'},
+        {'etiqueta_y': r'$Vel_{filt}$ [mm/s]'}, 
+        {'etiqueta_y': r'$Acc_{filt}$ [mm/s²]'}
+    ]
+
+    for i in range(8):
+        row, col = i // 3, i % 3
+        ax = axs[row, col]
+        
+        y_real = Y_real_raw[:, i]
+        y_pred = Y_pred_raw[:, i]
+        
+        error_absoluto = np.abs(y_real - y_pred)
+        error_cuadratico = (y_real - y_pred)**2
+        
+        mae_l1 = np.mean(error_absoluto)
+        mse_l2 = np.mean(error_cuadratico)
+        rmse_val = np.sqrt(mse_l2)
+        
+        ax.plot(tiempo, y_real, label='Expert (CSV)', color='black', alpha=0.75, linewidth=1.8)
+        ax.plot(tiempo, y_pred, label='PPO Prediction', color='orange', linestyle='--', linewidth=1.5)
+        
+        ax.set_title("") 
+        if row == 2 or (row == 1 and col == 2): 
+             ax.set_xlabel('Time [s]', fontsize=12)
+        ax.set_ylabel(metadata_graficas[i]['etiqueta_y'], fontsize=12)
+        
+        ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+        
+        rango = np.max(np.abs(y_real))
+        if rango < 1e-4:
+            ax.set_ylim([-0.05, 0.05])
+        else:
+            min_y, max_y = np.min(y_real), np.max(y_real)
+            margen = (max_y - min_y) * 0.15
+            ax.set_ylim([min_y - margen, max_y + margen])
+            
+        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+            
+        texto_metricas = f"L1: {mae_l1:.4f}\nL2: {mse_l2:.4f}\nRMSE: {rmse_val:.4f}"
+        props = dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='gray')
+        ax.text(0.98, 0.72, texto_metricas, transform=ax.transAxes, fontsize=10, fontweight='bold',
+                verticalalignment='top', horizontalalignment='right', bbox=props)
+
+    # Gráfica 9: Error Normalizado
+    ax9 = axs[2, 2]
+    drift_norm = np.cumsum(Y_real_norm - Y_pred_norm, axis=0)
+    
+    error_L2_norm = np.linalg.norm(drift_norm, axis=1)
+    error_L1_norm = np.sum(np.abs(drift_norm), axis=1)
+    rmse_iterativo_norm = np.sqrt(np.cumsum(error_L2_norm**2) / np.arange(1, len(error_L2_norm) + 1))
+    
+    ax9.plot(tiempo, error_L1_norm, label='L1 Error', color='purple', linestyle=':', linewidth=1.8, alpha=0.8)
+    ax9.plot(tiempo, error_L2_norm, label='L2 Error', color='red', linewidth=1.8)
+    ax9.plot(tiempo, rmse_iterativo_norm, label='Cumulative RMSE', color='darkred', linestyle='-.', linewidth=2.0)
+    
+    ax9.fill_between(tiempo, error_L2_norm, color='red', alpha=0.1)
+    
+    ax9.set_title("")
+    ax9.set_xlabel('Time [s]', fontsize=12)
+    ax9.set_ylabel('Normalized Error', fontsize=12) 
+    
+    ax9.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+    ax9.grid(True, linestyle=':', alpha=0.6)
+    ax9.legend(loc='upper left', fontsize=10, framealpha=0.9)
+
+    plt.tight_layout(rect=[0, 0.02, 1, 0.96]) 
+    nombre_grafica = 'ppo_validation_matrix_3x3.png'
+    plt.savefig(nombre_grafica, dpi=300, bbox_inches='tight')
+    plt.show()
+
+if __name__ == "__main__":
+    main()
+```
+
+
+
 
 **Resultado Final:**
 
